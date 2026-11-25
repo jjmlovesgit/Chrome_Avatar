@@ -1,0 +1,208 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>IMTalker renderer_decode.tflite (512x512) — LiteRT.js WebGPU Benchmark</title>
+  <style>
+    body { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; background: #0f121a; color: #e6edf3; padding: 24px; max-width: 1120px; margin: 0 auto; }
+    h1 { font-size: 20px; color: #79c0ff; margin-bottom: 6px; }
+    .sub { color: #8b949e; margin-bottom: 18px; font-size: 13px; }
+    .row { display: flex; gap: 20px; align-items: flex-start; flex-wrap: wrap; margin-bottom: 18px; }
+    .card { background: #161b22; border: 1px solid #30363d; border-radius: 10px; padding: 12px; }
+    .card h3 { margin: 0 0 8px 0; font-size: 13px; color: #c9d1d9; }
+    canvas, img { width: 320px; height: 320px; border-radius: 8px; background: #000; display: block; }
+    pre { background: #161b22; border: 1px solid #30363d; border-radius: 8px; padding: 16px; white-space: pre-wrap; line-height: 1.5; font-size: 13px; }
+  </style>
+  <script type="importmap">
+    {
+      "imports": {
+        "@litertjs/core": "/web/node_modules/@litertjs/core/dist/index.js",
+        "@litertjs/wasm-utils": "/web/node_modules/@litertjs/wasm-utils/dist/index.js"
+      }
+    }
+  </script>
+</head>
+<body>
+  <h1>IMTalker 512×512 Renderer (renderer_decode.tflite) — LiteRT.js WebGPU Benchmark</h1>
+  <div class="sub">Authored in C++ via LiteRT Tensor API directly from renderer.safetensors (0 Python converters, 9.17 MB precomputed Puck face cache)</div>
+
+  <div class="row">
+    <div class="card">
+      <h3>Live WebGPU Output (512×512)</h3>
+      <canvas id="outCanvas" width="512" height="512"></canvas>
+    </div>
+    <div class="card">
+      <h3>PyTorch Golden Reference (512×512)</h3>
+      <img src="/ref_renderer/frame_ref.png" alt="PyTorch Reference" />
+    </div>
+  </div>
+
+  <pre id="log">Initializing...\n</pre>
+
+  <script type="module">
+    import { loadLiteRt, loadAndCompile, Tensor, isWebGPUSupported } from '@litertjs/core';
+
+    const logEl = document.getElementById('log');
+    const log = (msg) => { logEl.textContent += msg + '\n'; console.log(msg); };
+    const canvas = document.getElementById('outCanvas');
+    const ctx = canvas.getContext('2d');
+    const imgData = ctx.createImageData(512, 512);
+
+    async function fetchF32(url) {
+      const r = await fetch(url);
+      if (!r.ok) throw new Error(`HTTP ${r.status} for ${url}`);
+      return new Float32Array(await r.arrayBuffer());
+    }
+
+    function drawRgbFloat(rgb) {
+      const dst = imgData.data;
+      const n = 512 * 512;
+      for (let i = 0; i < n; i++) {
+        dst[i * 4 + 0] = Math.max(0, Math.min(255, Math.round(rgb[i * 3 + 0] * 255)));
+        dst[i * 4 + 1] = Math.max(0, Math.min(255, Math.round(rgb[i * 3 + 1] * 255)));
+        dst[i * 4 + 2] = Math.max(0, Math.min(255, Math.round(rgb[i * 3 + 2] * 255)));
+        dst[i * 4 + 3] = 255;
+      }
+      ctx.putImageData(imgData, 0, 0);
+    }
+
+    function computePsnr(a, b) {
+      let mse = 0, sumAbs = 0, maxAbs = 0;
+      for (let i = 0; i < b.length; i++) {
+        const d = a[i] - b[i];
+        const ad = Math.abs(d);
+        if (ad > maxAbs) maxAbs = ad;
+        sumAbs += ad;
+        mse += d * d;
+      }
+      mse /= b.length;
+      return {
+        psnr: mse > 1e-15 ? 10 * Math.log10(1 / mse) : 99.99,
+        mae255: (sumAbs / b.length) * 255,
+        max255: maxAbs * 255,
+      };
+    }
+
+    const INPUT_SPECS = [
+      ['t_c', [1, 32]],
+      ['i_r', [1, 512]],
+      ['ma_r_0', [1, 8, 8, 512]],
+      ['ma_r_1', [1, 16, 16, 512]],
+      ['ma_r_2', [1, 32, 32, 256]],
+      ['ma_r_3', [1, 64, 64, 128]],
+      ['f_r_0', [1, 8, 8, 512]],
+      ['f_r_1', [1, 16, 16, 512]],
+      ['f_r_2', [1, 32, 32, 256]],
+      ['f_r_3', [1, 64, 64, 128]],
+      ['f_r_4_pool', [4096, 64]],
+      ['f_r_5_pool', [4096, 32]],
+    ];
+
+    async function benchConfig(label, modelBytes, cache, frameRef, compileOpts, keepCanvas = false) {
+      log(`\n--- ${label} ---`);
+      const tComp0 = performance.now();
+      const model = await loadAndCompile(modelBytes, compileOpts);
+      const compMs = performance.now() - tComp0;
+      log(`Compiled in ${compMs.toFixed(1)} ms`);
+
+      // Keep static portrait cache tensors alive on WebGPU across frames (0-copy reuse!)
+      const staticTensors = {};
+      for (const [name, shape] of INPUT_SPECS) {
+        if (name === 't_c') continue;
+        let t = new Tensor(cache[name], shape);
+        if (compileOpts.accelerator === 'webgpu') {
+          const gpuT = await t.moveTo('webgpu');
+          t.delete();
+          t = gpuT;
+        }
+        staticTensors[name] = t;
+      }
+
+      const runFrame = async (tcArr, readback = true) => {
+        const tcTensor = new Tensor(tcArr, [1, 32]);
+        const inputs = { t_c: tcTensor, ...staticTensors };
+        const outputs = await model.run(inputs);
+        const outT = outputs.frame ?? Object.values(outputs)[0];
+        let arr = null;
+        if (readback) {
+          const hostOut = outT.accelerator === 'webgpu' ? await outT.moveTo('wasm') : outT;
+          arr = new Float32Array(hostOut.toTypedArray());
+          if (hostOut !== outT) hostOut.delete();
+        }
+        tcTensor.delete();
+        for (const k of Object.keys(outputs)) outputs[k].delete();
+        return arr;
+      };
+
+      // Warmup + golden PSNR verification
+      const tW0 = performance.now();
+      const rgb = await runFrame(cache.t_c, true);
+      const warmMs = performance.now() - tW0;
+      const stats = computePsnr(rgb, frameRef);
+      log(`Warmup + Parity: ${warmMs.toFixed(1)} ms | PSNR=${stats.psnr.toFixed(2)} dB | MAE=${stats.mae255.toFixed(4)}/255 | max_err=${stats.max255.toFixed(4)}/255`);
+      if (keepCanvas) drawRgbFloat(rgb);
+
+      // Benchmark 10 consecutive frames (including GPU->host readback + canvas blit)
+      const times = [];
+      for (let f = 0; f < 10; f++) {
+        const t0 = performance.now();
+        const frameRgb = await runFrame(cache.t_c, true);
+        if (keepCanvas) drawRgbFloat(frameRgb);
+        times.push(performance.now() - t0);
+      }
+      const avgMs = times.reduce((a, b) => a + b, 0) / times.length;
+      const fps = 1000 / avgMs;
+      log(`10-Frame Bench (w/ readback+canvas): avg=${avgMs.toFixed(2)} ms/frame (${fps.toFixed(1)} FPS) | frames=[${times.map(v => v.toFixed(1)).join(', ')}]`);
+
+      // Also measure pure GPU dispatch time without CPU readback (simulating zero-copy WebGPU canvas shader)
+      const gpuTimes = [];
+      for (let f = 0; f < 10; f++) {
+        const t0 = performance.now();
+        await runFrame(cache.t_c, false);
+        gpuTimes.push(performance.now() - t0);
+      }
+      const avgGpu = gpuTimes.reduce((a, b) => a + b, 0) / gpuTimes.length;
+      log(`10-Frame Bench (GPU-only, no readback): avg=${avgGpu.toFixed(2)} ms/frame (${(1000 / avgGpu).toFixed(1)} FPS)`);
+
+      for (const k of Object.keys(staticTensors)) staticTensors[k].delete();
+      model.delete();
+      return { label, compMs, warmMs, avgMs, fps, avgGpu, stats };
+    }
+
+    (async () => {
+      try {
+        log(`WebGPU supported: ${isWebGPUSupported()}`);
+        if (navigator.gpu) {
+          const adapter = await navigator.gpu.requestAdapter();
+          if (adapter?.info) {
+            log(`WebGPU Adapter: ${adapter.info.vendor} ${adapter.info.architecture} ${adapter.info.description || ''}`);
+          }
+        }
+
+        const tBoot0 = performance.now();
+        await loadLiteRt('/web/node_modules/@litertjs/core/wasm/', { jspi: true });
+        log(`LiteRT.js runtime loaded (JSPI) in ${(performance.now() - tBoot0).toFixed(1)} ms`);
+
+        const tFetch0 = performance.now();
+        const modelResp = await fetch('/renderer_decode.tflite');
+        const modelBytes = new Uint8Array(await modelResp.arrayBuffer());
+        const cache = {};
+        await Promise.all(INPUT_SPECS.map(async ([name]) => {
+          cache[name] = await fetchF32(`/ref_renderer/${name}.bin`);
+        }));
+        const frameRef = await fetchF32('/ref_renderer/frame_ref.bin');
+        log(`Loaded renderer_decode.tflite (${(modelBytes.byteLength / 1048576).toFixed(2)} MB) + Puck face cache in ${(performance.now() - tFetch0).toFixed(1)} ms`);
+
+        if (isWebGPUSupported()) {
+          await benchConfig('WebGPU (FP16)', modelBytes, cache, frameRef, { accelerator: 'webgpu', gpuOptions: { precision: 'fp16' } }, true);
+          await benchConfig('WebGPU (FP32)', modelBytes, cache, frameRef, { accelerator: 'webgpu', gpuOptions: { precision: 'fp32' } }, true);
+        }
+
+        log('\n=== RENDERER BENCHMARK COMPLETE ===');
+      } catch (err) {
+        log(`\nERROR: ${err?.stack || err}`);
+      }
+    })();
+  </script>
+</body>
+</html>

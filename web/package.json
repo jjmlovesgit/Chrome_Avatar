@@ -1,0 +1,10 @@
+{
+  "name": "imtalker-litert-web-poc",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "@litertjs/core": "^2.6.0",
+    "@mlc-ai/web-llm": "^0.2.89"
+  }
+}

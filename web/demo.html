@@ -1,0 +1,1524 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>IMTalker Browser Studio — 100% Browser-Local AI (WebLLM / Gemini Nano + SAPI + LiteRT.js WebGPU)</title>
+  <style>
+    * { box-sizing: border-box; }
+    body {
+      margin: 0; padding: 20px;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      background: #0b0e14; color: #e6edf3;
+      display: flex; flex-direction: column; align-items: center;
+    }
+    .wrap { width: 100%; max-width: 1160px; }
+    .top-bar {
+      display: flex; align-items: flex-start; justify-content: space-between;
+      gap: 14px; flex-wrap: wrap; margin-bottom: 14px;
+    }
+    h1 { margin: 0 0 4px; font-size: 21px; color: #79c0ff; }
+    .sub { color: #8b949e; font-size: 13px; margin: 0; }
+    .mem-hud {
+      background: #141923; border: 1px solid #2b3240; border-radius: 10px;
+      padding: 7px 12px; font-family: ui-monospace, Consolas, monospace;
+      text-align: right; min-width: 240px; cursor: pointer;
+      transition: border-color 0.15s ease;
+    }
+    .mem-hud:hover { border-color: #58a6ff; }
+    .mem-main {
+      display: flex; align-items: center; justify-content: flex-end; gap: 6px;
+      font-size: 13px; color: #c9d1d9;
+    }
+    .mem-main strong { color: #3fb950; font-size: 15px; }
+    .mem-main strong.warn { color: #d29922; }
+    .mem-main strong.high { color: #f85149; }
+    .mem-peak { font-size: 11px; color: #8b949e; }
+    .mem-sub { font-size: 11px; color: #8b949e; margin-top: 2px; }
+    .mem-dot {
+      width: 7px; height: 7px; border-radius: 50%; background: #3fb950;
+      display: inline-block; flex-shrink: 0; transition: transform 0.15s ease, opacity 0.15s ease;
+    }
+    .mem-dot.busy { background: #58a6ff; transform: scale(1.35); }
+    .grid { display: grid; grid-template-columns: 536px 1fr; gap: 18px; align-items: start; }
+    @media (max-width: 980px) { .grid { grid-template-columns: 1fr; } }
+
+    .stage {
+      background: #141923; border: 1px solid #2b3240; border-radius: 14px;
+      padding: 12px; position: relative;
+    }
+    canvas {
+      width: 512px; height: 512px; max-width: 100%; height: auto;
+      border-radius: 10px; background: #000; display: block;
+    }
+    .badge {
+      position: absolute; top: 22px; right: 22px;
+      background: rgba(11,14,20,0.85); border: 1px solid #30363d;
+      padding: 5px 10px; border-radius: 999px; font-size: 12px;
+      font-family: ui-monospace, Consolas, monospace; color: #3fb950;
+    }
+    .avatar-bar {
+      display: flex; align-items: center; justify-content: space-between;
+      gap: 8px; margin-top: 10px; flex-wrap: wrap;
+    }
+    .panel {
+      background: #141923; border: 1px solid #2b3240; border-radius: 14px;
+      padding: 15px; display: flex; flex-direction: column; gap: 12px;
+    }
+    .toolbar {
+      display: flex; gap: 8px; flex-wrap: wrap; align-items: center;
+      background: #0f131c; border: 1px solid #232a36; border-radius: 10px; padding: 8px 10px;
+      font-size: 12px;
+    }
+    .toolbar label { color: #8b949e; display: inline-flex; align-items: center; gap: 6px; }
+    select, input[type="text"] {
+      background: #161b22; color: #e6edf3; border: 1px solid #364152;
+      border-radius: 7px; padding: 6px 8px; font-size: 12.5px; outline: none;
+    }
+    select:focus, input[type="text"]:focus { border-color: #58a6ff; }
+    .status-pill {
+      margin-left: auto; font-size: 11px; padding: 3px 8px; border-radius: 999px;
+      font-family: ui-monospace, Consolas, monospace; border: 1px solid #30363d;
+      background: #161b22; color: #8b949e;
+    }
+    .status-pill.ok { color: #3fb950; border-color: #2ea043; }
+    .status-pill.warn { color: #d29922; border-color: #9e6a03; }
+
+    .chat-box {
+      background: #0b0e14; border: 1px solid #232a36; border-radius: 10px;
+      padding: 12px; height: 245px; overflow-y: auto;
+      display: flex; flex-direction: column; gap: 9px;
+    }
+    .msg {
+      max-width: 90%; padding: 8px 11px; border-radius: 10px; font-size: 13.5px; line-height: 1.45;
+    }
+    .msg.user { align-self: flex-end; background: #1f6feb; color: #fff; }
+    .msg.puck { align-self: flex-start; background: #1c2433; border: 1px solid #2f3e57; }
+    .msg.gretchen { align-self: flex-start; background: #261d2e; border: 1px solid #4d3361; }
+    .msg.sys { align-self: center; background: transparent; color: #8b949e; font-size: 12px; text-align: center; }
+    .msg .who { font-size: 11px; font-weight: 700; opacity: 0.78; margin-bottom: 2px; text-transform: uppercase; letter-spacing: 0.04em; }
+
+    .input-row { display: flex; gap: 8px; align-items: center; }
+    .input-row input[type="text"] { flex: 1; padding: 10px 12px; font-size: 14px; }
+
+    .btn-row { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+    button, label.file-btn {
+      background: #212836; color: #e6edf3; border: 1px solid #364152;
+      border-radius: 8px; padding: 8px 13px; font-size: 13px; font-weight: 600;
+      cursor: pointer; transition: all 0.12s ease; display: inline-flex; align-items: center; gap: 6px;
+    }
+    button:hover:not(:disabled), label.file-btn:hover { background: #2d3748; border-color: #58a6ff; }
+    button:disabled { opacity: 0.45; cursor: not-allowed; }
+    button.active { background: #1f6feb; border-color: #58a6ff; color: #fff; }
+    button.primary { background: #238636; border-color: #2ea043; color: #fff; }
+    button.primary:hover:not(:disabled) { background: #2ea043; }
+    button.danger { background: #b62324; border-color: #f85149; color: #fff; }
+    button.listening { background: #9e6a03; border-color: #d29922; color: #fff; animation: pulse 1.2s infinite; }
+    @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.65; } }
+    input[type="file"] { display: none; }
+
+    .metrics {
+      display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px;
+      font-family: ui-monospace, Consolas, monospace; font-size: 11.5px;
+    }
+    .metric { background: #0f131c; border: 1px solid #232a36; border-radius: 8px; padding: 7px 9px; }
+    .metric .k { color: #8b949e; font-size: 10.5px; }
+    .metric .v { color: #79c0ff; font-size: 13px; font-weight: 700; margin-top: 2px; }
+
+    details {
+      background: #0f131c; border: 1px solid #232a36; border-radius: 10px; padding: 8px 10px;
+    }
+    summary { cursor: pointer; font-size: 12px; color: #8b949e; font-weight: 600; }
+    .sliders { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; font-size: 12px; margin-top: 10px; }
+    .slider-item { background: #141923; border: 1px solid #232a36; border-radius: 8px; padding: 7px 9px; }
+    .slider-item label { display: flex; justify-content: space-between; color: #c9d1d9; margin-bottom: 4px; }
+    .slider-item input { width: 100%; }
+    pre {
+      margin: 10px 0 0; background: #0b0e14; border: 1px solid #232a36; border-radius: 8px;
+      padding: 9px; font-family: ui-monospace, Consolas, monospace; font-size: 11px;
+      line-height: 1.45; max-height: 170px; overflow-y: auto; white-space: pre-wrap; color: #c9d1d9;
+    }
+  </style>
+  <script type="importmap">
+    {
+      "imports": {
+        "@litertjs/core": "/web/node_modules/@litertjs/core/dist/index.js",
+        "@litertjs/wasm-utils": "/web/node_modules/@litertjs/wasm-utils/dist/index.js",
+        "@mlc-ai/web-llm": "/web/node_modules/@mlc-ai/web-llm/lib/index.js"
+      }
+    }
+  </script>
+</head>
+<body>
+  <div class="wrap">
+    <div class="top-bar">
+      <div>
+        <h1>IMTalker Browser Studio — 100% Browser-Local AI (WebGPU)</h1>
+        <div class="sub">Chrome Gemini Nano / WebLLM → Windows SAPI Voice → 512×512 LiteRT.js WebGPU IMTalker</div>
+      </div>
+      <div class="mem-hud" id="memHud" title="Click to refresh now · Live GPU VRAM & Browser Memory (updates automatically during queries)">
+        <div class="mem-main">
+          <span class="mem-dot" id="memDot"></span>
+          <span>VRAM:</span>
+          <strong id="memVramVal">-- GB</strong>
+          <span class="mem-peak" id="memPeakVal"></span>
+        </div>
+        <div class="mem-sub" id="memBreakdown">Measuring live GPU memory…</div>
+      </div>
+    </div>
+
+    <div class="grid">
+      <div class="stage">
+        <canvas id="avatarCanvas" width="512" height="512"></canvas>
+        <div class="badge" id="statusBadge">Booting WebGPU…</div>
+        <div class="avatar-bar">
+          <div class="btn-row">
+            <button id="btnPuck" class="active" disabled>Puck</button>
+            <button id="btnGretchen" disabled>Gretchen</button>
+          </div>
+          <label style="font-size:12px; color:#8b949e; display:inline-flex; align-items:center; gap:5px;">
+            Precision:
+            <select id="precisionSelect">
+              <option value="fp32">FP32 (118 dB · ~3.1 GB avatar)</option>
+              <option value="fp16">FP16 (43 dB · ~2.1 GB avatar)</option>
+            </select>
+          </label>
+          <label style="font-size:12px; color:#8b949e; display:inline-flex; align-items:center; gap:5px;">
+            SAPI:
+            <select id="voiceSelect">
+              <option value="Andrew (Natural HD)">Andrew HD (Puck)</option>
+              <option value="Jenny(Natural)">Jenny (Gretchen)</option>
+              <option value="Aria (Natural)">Aria</option>
+              <option value="Ryan (Natural)">Ryan UK</option>
+            </select>
+          </label>
+        </div>
+      </div>
+
+      <div class="panel">
+        <div class="toolbar">
+          <label>
+            In-Browser LLM:
+            <select id="llmBackend">
+              <option value="nano" selected>Chrome Gemini Nano (Built-in · Default)</option>
+              <option value="webllm:Llama-3.2-1B-Instruct-q4f16_1-MLC">WebLLM: Llama 3.2 1B (0.88 GB VRAM)</option>
+              <option value="webllm:gemma-2-2b-it-q4f16_1-MLC-1k">WebLLM: Gemma 2 2B (1.58 GB VRAM)</option>
+              <option value="webllm:Qwen2.5-1.5B-Instruct-q4f16_1-MLC">WebLLM: Qwen 2.5 1.5B (1.63 GB VRAM)</option>
+              <option value="local">Local Server LLM (127.0.0.1:1234)</option>
+            </select>
+          </label>
+          <button id="btnDownloadNano" style="display:none; padding:5px 10px; font-size:12px;">⬇ Download Nano</button>
+          <span class="status-pill" id="llmPill">Checking Gemini Nano…</span>
+        </div>
+
+        <div class="chat-box" id="chatBox">
+          <div class="msg sys">Ask anything by text or voice — say <b>"Hey Puck…"</b> or <b>"Hey Gretchen…"</b> to switch avatars automatically.</div>
+        </div>
+
+        <div class="input-row">
+          <input id="chatInput" type="text" placeholder="Ask Puck or Gretchen anything… (Enter to send)" disabled />
+          <button id="btnSend" class="primary" disabled>Send</button>
+          <button id="btnVoiceAsk" disabled title="Ask a question using your microphone">🎤 Ask</button>
+          <button id="btnStop" class="danger" disabled>■</button>
+        </div>
+
+        <div class="toolbar" style="justify-content:space-between;">
+          <label style="flex:1; min-width:200px;">
+            Demo Topic:
+            <select id="demoTopic" style="flex:1;">
+              <option value="what you each did last weekend">What you did last weekend</option>
+              <option value="your favorite coffee shops and weekend reading">Coffee &amp; weekend reading</option>
+              <option value="running live 512x512 talking avatars 100% inside a web browser">Running avatars 100% in browser</option>
+              <option value="planning a spontaneous weekend road trip together">Planning a weekend road trip</option>
+            </select>
+          </label>
+          <button id="btnDemoChat" disabled title="Watch Puck and Gretchen have a live 3-turn conversation">🎭 3-Turn Demo Chat</button>
+        </div>
+
+        <div class="metrics">
+          <div class="metric"><div class="k">In-Browser LLM</div><div class="v" id="mLlm">—</div></div>
+          <div class="metric"><div class="k">SAPI TTS</div><div class="v" id="mTts">—</div></div>
+          <div class="metric"><div class="k">Wav2Vec + FM</div><div class="v" id="mMotion">—</div></div>
+          <div class="metric"><div class="k">Renderer 512²</div><div class="v" id="mRend">—</div></div>
+        </div>
+
+        <details open>
+          <summary>Motion Controls, Sample Audio & Console Log</summary>
+          <div class="btn-row" style="margin-top:8px;">
+            <button id="btnPlayPuck" disabled>▶ Puck Sample</button>
+            <button id="btnPlayGretchen" disabled>▶ Gretchen Sample</button>
+            <label class="file-btn" for="audioFile">📁 Upload Audio</label>
+            <input id="audioFile" type="file" accept="audio/*" />
+            <button id="btnClearChat" style="margin-left:auto;">Clear Chat</button>
+          </div>
+          <div class="sliders">
+            <div class="slider-item">
+              <label><span>CFG Scale (Lips)</span><span id="cfgVal">2.6</span></label>
+              <input id="cfgSlider" type="range" min="1.2" max="3.4" step="0.1" value="2.6" />
+            </div>
+            <div class="slider-item">
+              <label><span>Calm Pose Weight</span><span id="poseVal">0.45</span></label>
+              <input id="poseSlider" type="range" min="0.0" max="1.0" step="0.05" value="0.45" />
+            </div>
+            <div class="slider-item">
+              <label><span>ODE Steps (NFE)</span><span id="nfeVal">6</span></label>
+              <input id="nfeSlider" type="range" min="4" max="10" step="1" value="6" />
+            </div>
+            <div class="slider-item">
+              <label><span>Blink Strength</span><span id="blinkVal">1.35</span></label>
+              <input id="blinkSlider" type="range" min="0.0" max="1.8" step="0.05" value="1.35" />
+            </div>
+          </div>
+          <pre id="log">Booting 100% browser-local AI pipeline...
+</pre>
+        </details>
+      </div>
+    </div>
+  </div>
+
+  <script type="module">
+    import { loadLiteRt, loadAndCompile, Tensor, isWebGPUSupported, getWebGpuDevice, unloadLiteRt } from '@litertjs/core';
+    import * as webllm from '@mlc-ai/web-llm';
+
+    const logEl = document.getElementById('log');
+    const badgeEl = document.getElementById('statusBadge');
+    const chatBox = document.getElementById('chatBox');
+    const chatInput = document.getElementById('chatInput');
+    const llmBackendEl = document.getElementById('llmBackend');
+    const precisionSelectEl = document.getElementById('precisionSelect');
+    const voiceSelectEl = document.getElementById('voiceSelect');
+    const llmPillEl = document.getElementById('llmPill');
+    const btnDownloadNano = document.getElementById('btnDownloadNano');
+    const memHudEl = document.getElementById('memHud');
+    const memDotEl = document.getElementById('memDot');
+    const memVramValEl = document.getElementById('memVramVal');
+    const memPeakValEl = document.getElementById('memPeakVal');
+    const memBreakdownEl = document.getElementById('memBreakdown');
+
+    let peakVramGb = 0;
+    let memPollInFlight = false;
+    const isGoogleChromeBrand = !!navigator.userAgentData?.brands?.some(b => b.brand === 'Google Chrome');
+    const isEdgeBrand = !!navigator.userAgentData?.brands?.some(b => b.brand === 'Microsoft Edge');
+
+    async function refreshMemoryHud(force = false) {
+      if (memPollInFlight && !force) return;
+      memPollInFlight = true;
+      memDotEl.classList.add('busy');
+      try {
+        const resp = await fetch(force ? '/api/vram?force=1' : '/api/vram');
+        if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+        const d = await resp.json();
+        if (!d.ok) throw new Error(d.error || 'VRAM unavailable');
+
+        let browserMb = d.antigravityGpuMb || 0;
+        let parts = [];
+        if (isGoogleChromeBrand) {
+          browserMb = d.chromeTotalMb || 0;
+          if (d.chromeNanoMb > 5) parts.push(`Nano ${(d.chromeNanoMb / 1024).toFixed(2)}G`);
+          parts.push(`WebGPU ${(d.chromeGpuMb / 1024).toFixed(2)}G`);
+        } else if (isEdgeBrand) {
+          browserMb = d.edgeGpuMb || 0;
+          parts.push(`Edge ${(browserMb / 1024).toFixed(2)}G`);
+        } else {
+          parts.push(`WebGPU ${(browserMb / 1024).toFixed(2)}G`);
+        }
+
+        const jsHeapMb = performance.memory?.usedJSHeapSize ? (performance.memory.usedJSHeapSize / 1048576) : 0;
+        if (jsHeapMb > 0) parts.push(`JS ${(jsHeapMb / 1024).toFixed(2)}G`);
+
+        const vramGb = browserMb / 1024;
+        if (vramGb > peakVramGb) peakVramGb = vramGb;
+
+        memVramValEl.textContent = `${vramGb.toFixed(2)} GB`;
+        memVramValEl.className = vramGb >= 10 ? 'high' : vramGb >= 6 ? 'warn' : '';
+        memPeakValEl.textContent = peakVramGb > 0 ? `(Peak ${peakVramGb.toFixed(2)}G)` : '';
+        memBreakdownEl.textContent = parts.join(' · ');
+
+        const sysUsedGb = d.gpuUsedMb ? (d.gpuUsedMb / 1024).toFixed(1) : '?';
+        const sysTotGb = d.gpuTotalMb ? (d.gpuTotalMb / 1024).toFixed(1) : '?';
+        memHudEl.title = `${d.gpuName || 'GPU'}: ${sysUsedGb} / ${sysTotGb} GB system total · Browser VRAM: ${vramGb.toFixed(2)} GB (Peak ${peakVramGb.toFixed(2)} GB) · Poll ${d.ms} ms · Click to refresh`;
+      } catch {
+        const jsHeapMb = performance.memory?.usedJSHeapSize ? (performance.memory.usedJSHeapSize / 1048576) : 0;
+        if (jsHeapMb > 0) {
+          memVramValEl.textContent = `JS ${(jsHeapMb / 1024).toFixed(2)} GB`;
+          memBreakdownEl.textContent = 'Live GPU counter unavailable';
+        }
+      } finally {
+        memPollInFlight = false;
+        setTimeout(() => memDotEl.classList.remove('busy'), 220);
+      }
+    }
+
+    memHudEl.onclick = () => { peakVramGb = 0; refreshMemoryHud(true); };
+    setInterval(() => { if (!document.hidden) refreshMemoryHud(false); }, 3000);
+
+    const canvas = document.getElementById('avatarCanvas');
+    const ctx = canvas.getContext('2d');
+    const imgData = ctx.createImageData(512, 512);
+
+    const mLlm = document.getElementById('mLlm');
+    const mTts = document.getElementById('mTts');
+    const mMotion = document.getElementById('mMotion');
+    const mRend = document.getElementById('mRend');
+
+    const cfgSlider = document.getElementById('cfgSlider');
+    const poseSlider = document.getElementById('poseSlider');
+    const nfeSlider = document.getElementById('nfeSlider');
+    const blinkSlider = document.getElementById('blinkSlider');
+    cfgSlider.oninput = () => document.getElementById('cfgVal').textContent = cfgSlider.value;
+    poseSlider.oninput = () => document.getElementById('poseVal').textContent = poseSlider.value;
+    nfeSlider.oninput = () => document.getElementById('nfeVal').textContent = nfeSlider.value;
+    blinkSlider.oninput = () => document.getElementById('blinkVal').textContent = blinkSlider.value;
+
+    const btnPuck = document.getElementById('btnPuck');
+    const btnGretchen = document.getElementById('btnGretchen');
+    const btnSend = document.getElementById('btnSend');
+    const btnVoiceAsk = document.getElementById('btnVoiceAsk');
+    const btnStop = document.getElementById('btnStop');
+    const btnDemoChat = document.getElementById('btnDemoChat');
+    const demoTopicEl = document.getElementById('demoTopic');
+    const btnPlayPuck = document.getElementById('btnPlayPuck');
+    const btnPlayGretchen = document.getElementById('btnPlayGretchen');
+    const btnClearChat = document.getElementById('btnClearChat');
+    const audioFile = document.getElementById('audioFile');
+
+    const log = (msg) => {
+      logEl.textContent += msg + '\n';
+      logEl.scrollTop = logEl.scrollHeight;
+      console.log(msg);
+    };
+
+    function setLlmPill(text, cls = '') {
+      llmPillEl.textContent = text;
+      llmPillEl.className = `status-pill ${cls}`.trim();
+    }
+
+    function addChatBubble(roleClass, whoLabel, text) {
+      const div = document.createElement('div');
+      div.className = `msg ${roleClass}`;
+      if (whoLabel) {
+        const w = document.createElement('div');
+        w.className = 'who';
+        w.textContent = whoLabel;
+        div.appendChild(w);
+      }
+      const body = document.createElement('div');
+      body.textContent = text;
+      div.appendChild(body);
+      chatBox.appendChild(div);
+      chatBox.scrollTop = chatBox.scrollHeight;
+      return body;
+    }
+
+    const PERSONAS = {
+      puck: {
+        name: 'Puck',
+        voice: 'Andrew (Natural HD)',
+        systemPrompt:
+          'You are Puck, a warm, witty, sharp real-time AI companion sharing a room with Gretchen. ' +
+          'Reply naturally in 1 to 2 concise spoken sentences as Puck only. ' +
+          'Never repeat what someone else just said, never write speaker labels or names followed by a colon, and never use markdown, bullet points, asterisks, or emojis.',
+      },
+      gretchen: {
+        name: 'Gretchen',
+        voice: 'Jenny(Natural)',
+        systemPrompt:
+          'You are Gretchen, an articulate, friendly, thoughtful real-time AI companion sharing a room with Puck. ' +
+          'Reply naturally in 1 to 2 concise spoken sentences as Gretchen only. ' +
+          'Never repeat what someone else just said, never write speaker labels or names followed by a colon, and never use markdown, bullet points, asterisks, or emojis.',
+      },
+    };
+
+    const AVATAR_SPECS = [
+      ['i_r', [1, 512]],
+      ['ma_r_0', [1, 8, 8, 512]],
+      ['ma_r_1', [1, 16, 16, 512]],
+      ['ma_r_2', [1, 32, 32, 256]],
+      ['ma_r_3', [1, 64, 64, 128]],
+      ['f_r_0', [1, 8, 8, 512]],
+      ['f_r_1', [1, 16, 16, 512]],
+      ['f_r_2', [1, 32, 32, 256]],
+      ['f_r_3', [1, 64, 64, 128]],
+      ['f_r_4_pool', [4096, 64]],
+      ['f_r_5_pool', [4096, 32]],
+    ];
+
+    let gpuPrecision = 'fp32';
+    const getWebGpuOpts = () => ({ accelerator: 'webgpu', gpuOptions: { precision: gpuPrecision } });
+
+    let w2vBytes = null, fmBytes = null, rendBytes = null;
+    let w2vModel = null, fmModel = null, rendModel = null;
+    let blinkDelta = null;
+    let avatars = {};
+    let activeAvatarName = 'puck';
+    let abortToken = 0;
+    let dialogueToken = 0;
+    let currentAudioCtx = null;
+    let currentSource = null;
+    let busy = false;
+    let roomHistory = [];
+
+    // In-Browser LLM engines
+    let webllmEngine = null;
+    let webllmModelId = null;
+    let webllmLoadingPromise = null;
+    let nanoApi = null;
+    let nanoStatus = 'unavailable';
+    let nanoSessions = {};
+
+    async function fetchBytes(url) {
+      const r = await fetch(url);
+      if (!r.ok) throw new Error(`HTTP ${r.status} for ${url}`);
+      return new Uint8Array(await r.arrayBuffer());
+    }
+    async function fetchF32(url) {
+      const r = await fetch(url);
+      if (!r.ok) throw new Error(`HTTP ${r.status} for ${url}`);
+      return new Float32Array(await r.arrayBuffer());
+    }
+
+    // =========================================================================
+    // In-Browser WebLLM (Automatic Download + IndexedDB Cache, 100% WebGPU!)
+    // =========================================================================
+    async function ensureWebLlm(modelId) {
+      if (webllmEngine && webllmModelId === modelId) return webllmEngine;
+      if (webllmLoadingPromise) return webllmLoadingPromise;
+
+      webllmLoadingPromise = (async () => {
+        if (webllmEngine) {
+          try { await webllmEngine.unload(); } catch {}
+          webllmEngine = null;
+          webllmModelId = null;
+        }
+        const t0 = performance.now();
+        log(`Loading in-browser WebLLM: ${modelId} (auto-cached in browser)...`);
+        setLlmPill('Loading WebLLM 0%', 'warn');
+        const engine = await webllm.CreateMLCEngine(modelId, {
+          initProgressCallback: (report) => {
+            const pct = Math.round((report.progress || 0) * 100);
+            setLlmPill(`WebLLM ${pct}%`, 'warn');
+            if (pct === 100 || pct % 25 === 0) {
+              log(`  [WebLLM] ${report.text}`);
+            }
+          },
+        });
+        webllmEngine = engine;
+        webllmModelId = modelId;
+        const sec = ((performance.now() - t0) / 1000).toFixed(1);
+        log(`✓ WebLLM ready: ${modelId} (${sec}s)`);
+        setLlmPill(`WebLLM Ready (${modelId.split('-')[0]})`, 'ok');
+        return engine;
+      })();
+
+      try {
+        return await webllmLoadingPromise;
+      } finally {
+        webllmLoadingPromise = null;
+      }
+    }
+
+    // =========================================================================
+    // Chrome Built-in Gemini Nano (Default! Auto-prewarms when available)
+    // =========================================================================
+    async function detectGeminiNano(autoFallback = true) {
+      nanoApi = globalThis.LanguageModel || globalThis.ai?.languageModel || null;
+      if (!nanoApi) {
+        nanoStatus = 'unavailable';
+      } else if (typeof nanoApi.availability === 'function') {
+        try {
+          nanoStatus = await nanoApi.availability({
+            expectedInputs: [{ type: 'text', languages: ['en'] }],
+            expectedOutputs: [{ type: 'text', languages: ['en'] }],
+          });
+        } catch {
+          try { nanoStatus = await nanoApi.availability(); } catch { nanoStatus = 'unavailable'; }
+        }
+      } else if (typeof nanoApi.capabilities === 'function') {
+        try {
+          const c = await nanoApi.capabilities();
+          nanoStatus = c.available === 'readily' ? 'available'
+                     : c.available === 'after-download' ? 'downloadable' : 'unavailable';
+        } catch { nanoStatus = 'unavailable'; }
+      }
+      const brands = (navigator.userAgentData?.brands || []).map(b => `${b.brand}/${b.version}`).join(', ') || navigator.userAgent;
+      const isBrandedChrome = navigator.userAgentData?.brands?.some(b => b.brand === 'Google Chrome');
+      log(`Chrome Gemini Nano status: ${nanoStatus} (brandedChrome=${!!isBrandedChrome}, secure=${window.isSecureContext}, origin=${location.origin}, brands=${brands})`);
+
+      if (llmBackendEl.value !== 'nano') {
+        if (llmBackendEl.value === 'local') setLlmPill('Local LLM (1234)', 'ok');
+        return;
+      }
+
+      if (nanoStatus === 'available' || nanoStatus === 'readily') {
+        btnDownloadNano.style.display = 'none';
+        setLlmPill('Gemini Nano Ready', 'ok');
+      } else if (nanoStatus === 'downloadable' || nanoStatus === 'downloading') {
+        btnDownloadNano.style.display = 'inline-block';
+        setLlmPill('Nano: Auto-loads on Send', 'warn');
+      } else {
+        btnDownloadNano.style.display = 'none';
+        if (autoFallback) {
+          log('⚠️ Chrome Gemini Nano API unavailable in this tab — falling back to WebLLM (Llama 3.2 1B).');
+          llmBackendEl.value = 'webllm:Llama-3.2-1B-Instruct-q4f16_1-MLC';
+          setLlmPill('Fallback: WebLLM', 'warn');
+        } else {
+          setLlmPill('Nano Unavailable', 'warn');
+        }
+      }
+    }
+
+    async function getOrCreateNanoSession(avatarKey) {
+      if (nanoSessions[avatarKey]) return nanoSessions[avatarKey];
+      if (!nanoApi) nanoApi = globalThis.LanguageModel || globalThis.ai?.languageModel || null;
+      if (!nanoApi) {
+        const isBrandedChrome = navigator.userAgentData?.brands?.some(b => b.brand === 'Google Chrome');
+        const hint = !isBrandedChrome
+          ? 'Open http://127.0.0.1:8765/ in Google Chrome (not Edge/Firefox), or switch to WebLLM.'
+          : 'Make sure you are not in Incognito and enable chrome://flags/#prompt-api-for-gemini-nano (then relaunch Chrome), or switch to WebLLM.';
+        throw new Error(`Chrome LanguageModel API unavailable in this tab. ${hint}`);
+      }
+      const monitor = (m) => {
+        m.addEventListener('downloadprogress', (e) => {
+          const pct = e.total ? Math.round((e.loaded / e.total) * 100) : Math.round((e.loaded || 0) * 100);
+          setLlmPill(`Downloading Nano ${pct}%`, 'warn');
+        });
+      };
+      let session;
+      try {
+        session = await nanoApi.create({
+          initialPrompts: [{ role: 'system', content: PERSONAS[avatarKey].systemPrompt }],
+          expectedInputs: [{ type: 'text', languages: ['en'] }],
+          expectedOutputs: [{ type: 'text', languages: ['en'] }],
+          temperature: 0.7,
+          topK: 3,
+          monitor,
+        });
+      } catch {
+        session = await nanoApi.create({
+          systemPrompt: PERSONAS[avatarKey].systemPrompt,
+          initialPrompts: [{ role: 'system', content: PERSONAS[avatarKey].systemPrompt }],
+          temperature: 0.7,
+          topK: 3,
+          monitor,
+        });
+      }
+      nanoSessions[avatarKey] = session;
+      nanoStatus = 'available';
+      btnDownloadNano.style.display = 'none';
+      setLlmPill('Gemini Nano Ready', 'ok');
+      return session;
+    }
+
+    btnDownloadNano.onclick = async () => {
+      try {
+        btnDownloadNano.disabled = true;
+        setLlmPill('Downloading Nano…', 'warn');
+        await getOrCreateNanoSession(activeAvatarName);
+        log('✓ Chrome Gemini Nano downloaded & ready!');
+      } catch (e) {
+        log(`Gemini Nano download error: ${e?.message || e}`);
+        setLlmPill('Nano Error', 'err');
+      } finally {
+        btnDownloadNano.disabled = false;
+      }
+    };
+
+    function detectAddressedAvatar(text) {
+      const lower = text.toLowerCase();
+      const idxG = lower.search(/\b(gretchen|gretchin|gretchan)\b/);
+      const idxP = lower.search(/\b(puck)\b/);
+      if (idxG >= 0 && (idxP < 0 || idxG < idxP)) return 'gretchen';
+      if (idxP >= 0 && (idxG < 0 || idxP < idxG)) return 'puck';
+      return activeAvatarName;
+    }
+
+    async function askLlm(avatarKey, userText, bubbleEl) {
+      const t0 = performance.now();
+      const persona = PERSONAS[avatarKey];
+      let backend = llmBackendEl.value;
+      const recent = roomHistory.slice(-10);
+
+      const buildMessages = () => {
+        const msgs = [{ role: 'system', content: persona.systemPrompt }];
+        // Map ONLY the current speaker's own turns as 'assistant';
+        // map the user and the other avatar's turns as 'user' so the model never mimics speaker tags or echoes them.
+        for (const m of recent) {
+          if (m.speaker === persona.name) {
+            msgs.push({ role: 'assistant', content: m.text });
+          } else {
+            const prefix = m.speaker === 'You' ? '' : `${m.speaker} just said: `;
+            const content = `${prefix}${m.text}`;
+            if (msgs.length > 1 && msgs[msgs.length - 1].role === 'user') {
+              msgs[msgs.length - 1].content += '\n' + content;
+            } else {
+              msgs.push({ role: 'user', content });
+            }
+          }
+        }
+        if (msgs.length > 1 && msgs[msgs.length - 1].role === 'user') {
+          msgs[msgs.length - 1].content += '\n\n' + userText;
+        } else {
+          msgs.push({ role: 'user', content: userText });
+        }
+        return msgs;
+      };
+
+      let reply = '';
+      let tag = 'WebLLM';
+
+      if (backend === 'nano') {
+        tag = 'Nano';
+        const contextStr = recent.length
+          ? 'Context from earlier in the room (for reference only — do NOT repeat or quote this, and do NOT write any speaker name prefix):\n' +
+            recent.map(m => `(${m.speaker} said) ${m.text}`).join('\n') +
+            `\n\nNow respond in 1 to 2 natural spoken sentences as ${persona.name} only:\n${userText}`
+          : userText;
+        const baseSession = await getOrCreateNanoSession(avatarKey);
+        let session = baseSession;
+        let cloned = false;
+        if (typeof baseSession.clone === 'function') {
+          try { session = await baseSession.clone(); cloned = true; } catch {}
+        }
+        try {
+          if (typeof session.promptStreaming === 'function') {
+            const stream = await session.promptStreaming(contextStr);
+            for await (const chunk of stream) {
+              reply = (reply && chunk.startsWith(reply)) ? chunk : (reply + chunk);
+              bubbleEl.textContent = reply;
+              chatBox.scrollTop = chatBox.scrollHeight;
+            }
+          } else {
+            reply = await session.prompt(contextStr);
+            bubbleEl.textContent = reply;
+          }
+        } finally {
+          if (cloned && typeof session.destroy === 'function') {
+            try { session.destroy(); } catch {}
+          }
+        }
+        if (reply.includes('On-device model is not available in Chromium')) {
+          log('⚠️ Unbranded Chromium echo stub detected — auto-switching to in-browser WebLLM (Llama 3.2 1B)...');
+          llmBackendEl.value = 'webllm:Llama-3.2-1B-Instruct-q4f16_1-MLC';
+          backend = llmBackendEl.value;
+          reply = '';
+          bubbleEl.textContent = 'Loading in-browser WebLLM…';
+        }
+      }
+
+      if (backend.startsWith('webllm:')) {
+        tag = 'WebLLM';
+        const modelId = backend.slice('webllm:'.length);
+        const engine = await ensureWebLlm(modelId);
+        const chunks = await engine.chat.completions.create({
+          messages: buildMessages(),
+          temperature: 0.55,
+          top_p: 0.9,
+          frequency_penalty: 0.5,
+          presence_penalty: 0.3,
+          max_tokens: 72,
+          stream: true,
+        });
+        for await (const chunk of chunks) {
+          const delta = chunk.choices?.[0]?.delta?.content || '';
+          if (delta) {
+            reply += delta;
+            bubbleEl.textContent = reply;
+            chatBox.scrollTop = chatBox.scrollHeight;
+          }
+        }
+      } else if (backend === 'local') {
+        tag = 'Local';
+        const resp = await fetch('/api/llm', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ messages: buildMessages(), max_tokens: 120, temperature: 0.7 }),
+        });
+        const data = await resp.json();
+        if (!resp.ok) throw new Error(data.error || `HTTP ${resp.status}`);
+        reply = data?.choices?.[0]?.message?.content || '';
+        bubbleEl.textContent = reply;
+      }
+
+      reply = reply.replace(/[*_`#]/g, '').trim();
+      // If the model echoed a transcript ("Puck: ... Gretchen: <actual reply>"), keep only this speaker's line
+      const ownTagRe = new RegExp(`(?:^|\\n)\\s*(?:\\[?${persona.name}\\]?)\\s*:\\s*([\\s\\S]+)$`, 'i');
+      const ownMatch = reply.match(ownTagRe);
+      if (ownMatch && ownMatch[1].trim().length > 10) {
+        reply = ownMatch[1].trim();
+      }
+      // If the reply literally starts by echoing the previous speaker's turn, strip that echoed prefix
+      const lastPrev = recent.length ? recent[recent.length - 1] : null;
+      if (lastPrev && lastPrev.speaker !== persona.name && lastPrev.text.length > 20) {
+        const snippet = lastPrev.text.slice(0, 40).toLowerCase();
+        const lowerReply = reply.toLowerCase();
+        if (lowerReply.startsWith(snippet) || lowerReply.includes(lastPrev.text.toLowerCase())) {
+          const idx = lowerReply.indexOf(lastPrev.text.toLowerCase());
+          if (idx >= 0) {
+            const after = reply.slice(idx + lastPrev.text.length).replace(/^[\s"'—–:-]+/, '').trim();
+            if (after.length > 10) reply = after;
+          }
+        }
+      }
+      reply = reply
+        .replace(/^\s*\[[^\]]{1,24}\]\s*:?\s*/g, '')
+        .replace(/^\s*(?:Puck|Pucca|Pucky|Gretchen|Gretchin)\s*:\s*/i, '')
+        .trim();
+      // If a small model hit max_tokens mid-sentence, trim cleanly to the last sentence end
+      if (reply.length > 40 && !/[.!?]["']?$/.test(reply)) {
+        const lastEnd = Math.max(reply.lastIndexOf('.'), reply.lastIndexOf('!'), reply.lastIndexOf('?'));
+        if (lastEnd >= 25) reply = reply.slice(0, lastEnd + 1).trim();
+      }
+      bubbleEl.textContent = reply;
+      const ms = performance.now() - t0;
+      mLlm.textContent = `${ms.toFixed(0)} ms (${tag})`;
+      return { reply, ms, tag };
+    }
+
+    async function synthesizeSapi(text, avatarKey) {
+      const t0 = performance.now();
+      const voice = voiceSelectEl.value || PERSONAS[avatarKey].voice;
+      const resp = await fetch('/api/tts', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ text, avatar: avatarKey, voice }),
+      });
+      if (!resp.ok) throw new Error(`SAPI TTS failed: ${await resp.text()}`);
+      const wavBuf = await resp.arrayBuffer();
+      const sapiMs = resp.headers.get('X-TTS-Ms') || (performance.now() - t0).toFixed(0);
+      mTts.textContent = `${sapiMs} ms`;
+      return { wavBuf, ms: Number(sapiMs) };
+    }
+
+    // =========================================================================
+    // LiteRT.js WebGPU 3-Model Pipeline (ALL 3 FP16-weight models stay resident!
+    // Zero per-turn delete/recompile -> flat VRAM & ~550 ms faster per turn!)
+    // =========================================================================
+    async function loadAllAvatarModelsOnce() {
+      const audioOpts = { accelerator: 'webgpu', gpuOptions: { precision: 'fp32' } };
+      const t1 = performance.now();
+      w2vModel = await loadAndCompile(w2vBytes, audioOpts);
+      w2vBytes = null;
+      log(`  [resident] wav2vec2_2s compiled (${(performance.now() - t1).toFixed(0)} ms)`);
+
+      const t2 = performance.now();
+      fmModel = await loadAndCompile(fmBytes, audioOpts);
+      fmBytes = null;
+      log(`  [resident] fm_step compiled (${(performance.now() - t2).toFixed(0)} ms)`);
+
+      const t3 = performance.now();
+      rendModel = await loadAndCompile(rendBytes, getWebGpuOpts());
+      rendBytes = null;
+      log(`  [resident] renderer_decode (${gpuPrecision.toUpperCase()}) compiled (${(performance.now() - t3).toFixed(0)} ms)`);
+    }
+
+    async function loadStageAudio() { /* All 3 models stay resident — zero recompile! */ }
+    async function loadStageRender() { /* All 3 models stay resident — zero recompile! */ }
+
+    function destroyNanoSessions() {
+      let count = 0;
+      for (const k of Object.keys(nanoSessions)) {
+        try { nanoSessions[k]?.destroy?.(); count++; } catch {}
+        delete nanoSessions[k];
+      }
+      return count;
+    }
+
+    async function unloadWebLlmEngine() {
+      if (!webllmEngine) return false;
+      const eng = webllmEngine;
+      webllmEngine = null;
+      webllmModelId = null;
+      try { await eng.unload(); } catch {}
+      return true;
+    }
+
+    let gpuReleased = false;
+    async function releaseAllGpuResources(syncOnly = false) {
+      if (gpuReleased) return;
+      gpuReleased = true;
+      dialogueToken++;
+      try { stopPlayback(); } catch {}
+      destroyNanoSessions();
+
+      if (webllmEngine) {
+        if (syncOnly) {
+          try { webllmEngine.unload(); } catch {}
+          webllmEngine = null; webllmModelId = null;
+        } else {
+          await unloadWebLlmEngine();
+        }
+      }
+
+      try { if (w2vModel) { w2vModel.delete(); w2vModel = null; } } catch {}
+      try { if (fmModel) { fmModel.delete(); fmModel = null; } } catch {}
+      try { if (rendModel) { rendModel.delete(); rendModel = null; } } catch {}
+      for (const av of Object.values(avatars)) {
+        if (av?.gpuTensors) {
+          for (const t of Object.values(av.gpuTensors)) {
+            try { t?.delete?.(); } catch {}
+          }
+          av.gpuTensors = {};
+        }
+      }
+      try {
+        const dev = getWebGpuDevice();
+        if (dev && typeof dev.destroy === 'function') dev.destroy();
+      } catch {}
+      try { unloadLiteRt(); } catch {}
+    }
+
+    // Immediately free WebGPU device + models on refresh or tab close!
+    window.addEventListener('pagehide', () => { releaseAllGpuResources(true); });
+    window.addEventListener('beforeunload', () => { releaseAllGpuResources(true); });
+
+    precisionSelectEl.onchange = async () => {
+      badgeEl.textContent = 'Releasing GPU VRAM…';
+      memVramValEl.textContent = 'Resetting…';
+      memPeakValEl.textContent = '';
+      await releaseAllGpuResources(false);
+      await new Promise(r => setTimeout(r, 250));
+      const u = new URL(location.href);
+      u.searchParams.set('precision', precisionSelectEl.value);
+      if (llmBackendEl.value !== 'nano') u.searchParams.set('llm', llmBackendEl.value);
+      else u.searchParams.delete('llm');
+      location.href = u.toString();
+    };
+
+    llmBackendEl.onchange = async () => {
+      const val = llmBackendEl.value;
+      peakVramGb = 0;
+      memPeakValEl.textContent = '(Recalc…)';
+
+      if (val.startsWith('webllm:')) {
+        if (destroyNanoSessions() > 0) {
+          log('Released Gemini Nano sessions (Chrome unloads Nano VRAM after short idle timeout).');
+        }
+        try { await ensureWebLlm(val.slice('webllm:'.length)); } catch (e) { log(`WebLLM error: ${e.message}`); }
+      } else if (val === 'nano') {
+        if (await unloadWebLlmEngine()) {
+          log('✓ Unloaded WebLLM GPU engine.');
+        }
+        await detectGeminiNano(false);
+        if (nanoStatus === 'available' || nanoStatus === 'readily') {
+          try {
+            await getOrCreateNanoSession(activeAvatarName);
+            setLlmPill('Gemini Nano Ready', 'ok');
+          } catch (e) {
+            log(`Gemini Nano init warning: ${e?.message || e}`);
+            setLlmPill('Nano (loads on send)', 'warn');
+          }
+        } else if (nanoStatus === 'unavailable') {
+          setLlmPill('Nano Unavailable', 'warn');
+          addChatBubble('sys', null, 'Chrome LanguageModel API is unavailable in this tab. Use a normal Google Chrome window with chrome://flags/#prompt-api-for-gemini-nano enabled, or pick WebLLM.');
+        }
+      } else {
+        if (await unloadWebLlmEngine()) log('✓ Unloaded WebLLM GPU engine.');
+        if (destroyNanoSessions() > 0) log('Released Gemini Nano sessions.');
+        setLlmPill('Local LLM (1234)', 'ok');
+      }
+      // Recalculate fresh VRAM & Peak after GPU buffers finish releasing
+      await new Promise(r => setTimeout(r, 350));
+      peakVramGb = 0;
+      await refreshMemoryHud(true);
+      setTimeout(() => { peakVramGb = 0; refreshMemoryHud(true); }, 1500);
+    };
+
+    function drawRgbFloat(rgb) {
+      const dst = imgData.data;
+      const n = 512 * 512;
+      for (let i = 0; i < n; i++) {
+        dst[i * 4 + 0] = Math.max(0, Math.min(255, Math.round(rgb[i * 3 + 0] * 255)));
+        dst[i * 4 + 1] = Math.max(0, Math.min(255, Math.round(rgb[i * 3 + 1] * 255)));
+        dst[i * 4 + 2] = Math.max(0, Math.min(255, Math.round(rgb[i * 3 + 2] * 255)));
+        dst[i * 4 + 3] = 255;
+      }
+      ctx.putImageData(imgData, 0, 0);
+    }
+
+    async function loadAvatarCache(name) {
+      const base = `/avatars/${name}`;
+      const t_r = await fetchF32(`${base}/t_r.bin`);
+      const gpuTensors = {};
+      await Promise.all(AVATAR_SPECS.map(async ([key, shape]) => {
+        const arr = await fetchF32(`${base}/${key}.bin`);
+        const cpuT = new Tensor(arr, shape);
+        const gpuT = await cpuT.moveTo('webgpu');
+        cpuT.delete();
+        gpuTensors[key] = gpuT;
+      }));
+      const img = new Image();
+      img.src = `${base}/portrait.png`;
+      await img.decode();
+      return { name, t_r, gpuTensors, portraitImg: img };
+    }
+
+    function selectAvatar(name) {
+      activeAvatarName = name;
+      btnPuck.classList.toggle('active', name === 'puck');
+      btnGretchen.classList.toggle('active', name === 'gretchen');
+      voiceSelectEl.value = PERSONAS[name].voice;
+      if (avatars[name]?.portraitImg) ctx.drawImage(avatars[name].portraitImg, 0, 0, 512, 512);
+    }
+
+    function makeGaussian(len, seed = 42) {
+      let s = seed >>> 0;
+      const rand = () => { s = (1664525 * s + 1013904223) >>> 0; return (s + 0.5) / 4294967296; };
+      const out = new Float32Array(len);
+      for (let i = 0; i < len; i += 2) {
+        const u1 = Math.max(1e-7, rand()), u2 = rand();
+        const r = Math.sqrt(-2.0 * Math.log(u1)), th = 2.0 * Math.PI * u2;
+        out[i] = r * Math.cos(th);
+        if (i + 1 < len) out[i + 1] = r * Math.sin(th);
+      }
+      return out;
+    }
+
+    async function decodeTo16kMono(arrayBuffer) {
+      const tmpCtx = new AudioContext();
+      const decoded = await tmpCtx.decodeAudioData(arrayBuffer.slice(0));
+      await tmpCtx.close();
+      const targetLen = Math.ceil(decoded.duration * 16000);
+      const offline = new OfflineAudioContext(1, targetLen, 16000);
+      const src = offline.createBufferSource();
+      src.buffer = decoded;
+      src.connect(offline.destination);
+      src.start(0);
+      const rendered = await offline.startRendering();
+      return { pcm16k: rendered.getChannelData(0), duration: decoded.duration, origBuffer: decoded };
+    }
+
+    function normalizeChunk(pcm, startSample) {
+      const out = new Float32Array(32000);
+      const lastIdx = Math.max(0, pcm.length - 1);
+      for (let i = 0; i < 32000; i++) out[i] = (startSample + i) < pcm.length ? pcm[startSample + i] : pcm[lastIdx];
+      let mean = 0; for (let i = 0; i < 32000; i++) mean += out[i]; mean /= 32000;
+      let v = 0; for (let i = 0; i < 32000; i++) { const d = out[i] - mean; out[i] = d; v += d * d; }
+      const invStd = 1.0 / Math.sqrt(v / 32000 + 1e-7);
+      for (let i = 0; i < 32000; i++) out[i] *= invStd;
+      return out;
+    }
+
+    function buildCalmPose(frameOffset) {
+      const pose = new Float32Array(50 * 3);
+      for (let f = 0; f < 50; f++) {
+        const t = (frameOffset + f) / 25.0;
+        pose[f * 3 + 0] = 0.025 * Math.sin(2 * Math.PI * 0.20 * t);
+        pose[f * 3 + 1] = 0.035 * Math.sin(2 * Math.PI * 0.20 * 0.73 * t + 1.1);
+        pose[f * 3 + 2] = 0.012 * Math.sin(2 * Math.PI * 0.20 * 0.57 * t + 2.3);
+      }
+      return pose;
+    }
+
+    async function runWav2VecChunk(pcm32k, pose50x3) {
+      const t0 = performance.now();
+      const pcmT = new Tensor(pcm32k, [1, 32000]);
+      const poseT = new Tensor(pose50x3, [1, 50, 3]);
+      const outs = await w2vModel.run({ pcm_in: pcmT, pose_in: poseT });
+      const aHost = outs.a_now.accelerator === 'webgpu' ? await outs.a_now.moveTo('wasm') : outs.a_now;
+      const pHost = outs.pose_emb.accelerator === 'webgpu' ? await outs.pose_emb.moveTo('wasm') : outs.pose_emb;
+      const a_now = new Float32Array(aHost.toTypedArray());
+      const pose_emb = new Float32Array(pHost.toTypedArray());
+      if (aHost !== outs.a_now) aHost.delete();
+      if (pHost !== outs.pose_emb) pHost.delete();
+      pcmT.delete(); poseT.delete();
+      outs.a_now.delete(); outs.pose_emb.delete();
+      return { a_now, pose_emb, ms: performance.now() - t0 };
+    }
+
+    async function runFmChunk(a_now, pose_emb, ref_x, prevState, cfgScale, poseWeight, nfe, chunkIdx) {
+      const t0 = performance.now();
+      const D = 32, L_PREV = 10, L_CLIP = 50, L_TOT = 60;
+      const poseScaled = new Float32Array(L_CLIP * D);
+      for (let i = 0; i < poseScaled.length; i++) poseScaled[i] = pose_emb[i] * poseWeight;
+
+      const condIn = new Float32Array(2 * L_TOT * D);
+      for (let f = 0; f < L_PREV; f++) {
+        for (let d = 0; d < D; d++) {
+          const val = prevState.prev_a[f * D + d] + prevState.prev_pose[f * D + d];
+          condIn[(0 * L_TOT + f) * D + d] = val;
+          condIn[(1 * L_TOT + f) * D + d] = val;
+        }
+      }
+      for (let f = 0; f < L_CLIP; f++) {
+        for (let d = 0; d < D; d++) {
+          const p = poseScaled[f * D + d], a = a_now[f * D + d];
+          condIn[(0 * L_TOT + L_PREV + f) * D + d] = p;
+          condIn[(1 * L_TOT + L_PREV + f) * D + d] = a + p;
+        }
+      }
+
+      const z = makeGaussian(L_CLIP * D, 42 + chunkIdx * 101);
+      const xIn = new Float32Array(2 * L_TOT * 64);
+      for (let b = 0; b < 2; b++) {
+        for (let f = 0; f < L_TOT; f++) {
+          const base = (b * L_TOT + f) * 64;
+          for (let d = 0; d < D; d++) xIn[base + d] = ref_x[d];
+          if (f < L_PREV) for (let d = 0; d < D; d++) xIn[base + 32 + d] = prevState.prev_x[f * D + d];
+        }
+      }
+
+      const condCpu = new Tensor(condIn, [2, 60, 32]);
+      const condGpu = await condCpu.moveTo('webgpu');
+      condCpu.delete();
+      const cfgCpu = new Tensor(new Float32Array([cfgScale]), [1]);
+      const cfgGpu = await cfgCpu.moveTo('webgpu');
+      cfgCpu.delete();
+      const dt = 1.0 / (nfe - 1);
+      for (let step = 0; step < nfe - 1; step++) {
+        for (let b = 0; b < 2; b++) {
+          for (let f = 0; f < L_CLIP; f++) {
+            const base = (b * L_TOT + L_PREV + f) * 64 + 32, zBase = f * D;
+            for (let d = 0; d < D; d++) xIn[base + d] = z[zBase + d];
+          }
+        }
+        const tT = new Tensor(new Float32Array([step * dt]), [1]);
+        const xT = new Tensor(xIn, [2, 60, 64]);
+        const outs = await fmModel.run({ t: tT, x_in: xT, cond_in: condGpu, cfg_scale: cfgGpu });
+        const vHost = outs.velocity.accelerator === 'webgpu' ? await outs.velocity.moveTo('wasm') : outs.velocity;
+        const vel = vHost.toTypedArray();
+        for (let i = 0; i < z.length; i++) z[i] += dt * vel[i];
+        if (vHost !== outs.velocity) vHost.delete();
+        tT.delete(); xT.delete(); outs.velocity.delete();
+      }
+      condGpu.delete(); cfgGpu.delete();
+
+      return {
+        tokens: z,
+        nextPrev: {
+          prev_x: z.slice((L_CLIP - L_PREV) * D),
+          prev_a: a_now.slice((L_CLIP - L_PREV) * D),
+          prev_pose: poseScaled.slice((L_CLIP - L_PREV) * D),
+        },
+        ms: performance.now() - t0,
+      };
+    }
+
+    function applySpeakingBlinks(allTokens, totalFrames, strength) {
+      if (!blinkDelta || strength <= 0) return;
+      const intervalFrames = Math.round(3.4 * 25);
+      for (let start = 35; start + 9 < totalFrames; start += intervalFrames) {
+        for (let k = 0; k < 9; k++) {
+          const base = (start + k) * 32, bBase = k * 32;
+          for (let d = 0; d < 32; d++) allTokens[base + d] += strength * blinkDelta[bBase + d];
+        }
+      }
+    }
+
+    async function renderOneFrame(avatar, token32) {
+      const t0 = performance.now();
+      const tcT = new Tensor(token32, [1, 32]);
+      const outs = await rendModel.run({ t_c: tcT, ...avatar.gpuTensors });
+      const hostOut = outs.frame.accelerator === 'webgpu' ? await outs.frame.moveTo('wasm') : outs.frame;
+      const rgb = new Float32Array(hostOut.toTypedArray());
+      if (hostOut !== outs.frame) hostOut.delete();
+      tcT.delete(); outs.frame.delete();
+      drawRgbFloat(rgb);
+      return performance.now() - t0;
+    }
+
+    function stopPlayback() {
+      abortToken++;
+      if (currentSource) { try { currentSource.stop(); } catch {} currentSource = null; }
+      if (currentAudioCtx) { try { currentAudioCtx.close(); } catch {} currentAudioCtx = null; }
+      btnStop.disabled = true;
+      badgeEl.textContent = `Ready (${gpuPrecision.toUpperCase()})`;
+    }
+
+    async function speakAudioBuffer(arrayBuffer, label, playAudio = true) {
+      stopPlayback();
+      const myToken = abortToken;
+      btnStop.disabled = false;
+
+      const avatar = avatars[activeAvatarName];
+      const cfgScale = parseFloat(cfgSlider.value);
+      const poseWeight = parseFloat(poseSlider.value);
+      const nfe = parseInt(nfeSlider.value, 10);
+      const blinkStr = parseFloat(blinkSlider.value);
+
+      badgeEl.textContent = `Motion (${avatar.name})…`;
+      const { pcm16k, duration, origBuffer } = await decodeTo16kMono(arrayBuffer);
+      const totalFrames = Math.max(1, Math.ceil(duration * 25.0));
+      const numChunks = Math.ceil(totalFrames / 50);
+
+      await loadStageAudio();
+      const allTokens = new Float32Array(numChunks * 50 * 32);
+      let prevState = {
+        prev_x: new Float32Array(10 * 32),
+        prev_a: new Float32Array(10 * 32),
+        prev_pose: new Float32Array(10 * 32),
+      };
+      let totalW2vMs = 0, totalFmMs = 0;
+
+      for (let c = 0; c < numChunks; c++) {
+        if (myToken !== abortToken) return;
+        const w2vRes = await runWav2VecChunk(normalizeChunk(pcm16k, c * 32000), buildCalmPose(c * 50));
+        const fmRes = await runFmChunk(w2vRes.a_now, w2vRes.pose_emb, avatar.t_r, prevState, cfgScale, poseWeight, nfe, c);
+        totalW2vMs += w2vRes.ms; totalFmMs += fmRes.ms;
+        prevState = fmRes.nextPrev;
+        allTokens.set(fmRes.tokens, c * 50 * 32);
+      }
+
+      applySpeakingBlinks(allTokens, totalFrames, blinkStr);
+      mMotion.textContent = `${(totalW2vMs + totalFmMs).toFixed(0)} ms`;
+
+      await loadStageRender();
+      await renderOneFrame(avatar, allTokens.subarray(0, 32));
+
+      badgeEl.textContent = `Speaking (${avatar.name})`;
+      let audioStartTime = performance.now();
+      if (playAudio) {
+        try {
+          currentAudioCtx = new AudioContext();
+          if (currentAudioCtx.state === 'suspended') await currentAudioCtx.resume();
+          currentSource = currentAudioCtx.createBufferSource();
+          currentSource.buffer = origBuffer;
+          currentSource.connect(currentAudioCtx.destination);
+          currentSource.start(0);
+          audioStartTime = performance.now();
+        } catch (e) {
+          log(`  (Audio muted/blocked: ${e.message})`);
+        }
+      }
+
+      let renderedFrames = 0, sumRendMs = 0, lastFrameIdx = -1;
+      while (myToken === abortToken) {
+        const frameIdx = Math.floor(((performance.now() - audioStartTime) / 1000.0) * 25.0);
+        if (frameIdx >= totalFrames) break;
+        if (frameIdx === lastFrameIdx) { await new Promise(r => setTimeout(r, 4)); continue; }
+        lastFrameIdx = frameIdx;
+        const rMs = await renderOneFrame(avatar, allTokens.subarray(frameIdx * 32, (frameIdx + 1) * 32));
+        sumRendMs += rMs; renderedFrames++;
+        const avgR = sumRendMs / renderedFrames;
+        mRend.textContent = `${avgR.toFixed(1)} ms (${(1000 / avgR).toFixed(0)} FPS)`;
+      }
+
+      if (myToken === abortToken) {
+        const avgR = renderedFrames ? (sumRendMs / renderedFrames) : 0;
+        log(`✅ [${avatar.name}] ${renderedFrames}/${totalFrames} frames (${duration.toFixed(2)}s, ${gpuPrecision.toUpperCase()}) | motion=${(totalW2vMs + totalFmMs).toFixed(0)}ms | rend=${avgR.toFixed(1)}ms (${avgR ? (1000 / avgR).toFixed(1) : 0} FPS)`);
+        badgeEl.textContent = `Ready · ${avgR ? (1000 / avgR).toFixed(1) : 0} FPS`;
+        btnStop.disabled = true;
+      }
+    }
+
+    async function handleUserQuestion(questionText, playAudio = true) {
+      const q = questionText.trim();
+      if (!q || busy) return;
+      busy = true;
+      btnSend.disabled = true;
+      btnVoiceAsk.disabled = true;
+      btnDemoChat.disabled = true;
+      chatInput.value = '';
+
+      let replyBubble = null;
+      try {
+        const targetAvatar = detectAddressedAvatar(q);
+        if (targetAvatar !== activeAvatarName) selectAvatar(targetAvatar);
+
+        addChatBubble('user', 'You', q);
+        replyBubble = addChatBubble(targetAvatar, PERSONAS[targetAvatar].name, 'Thinking…');
+
+        badgeEl.textContent = `Thinking (${PERSONAS[targetAvatar].name})…`;
+        refreshMemoryHud(true);
+        const { reply, ms: llmMs, tag } = await askLlm(targetAvatar, q, replyBubble);
+        log(`💬 [${PERSONAS[targetAvatar].name} via ${tag}] (${llmMs.toFixed(0)}ms): ${reply}`);
+        refreshMemoryHud(true);
+
+        roomHistory.push({ role: 'user', speaker: 'You', text: q });
+        roomHistory.push({ role: 'assistant', speaker: PERSONAS[targetAvatar].name, text: reply });
+
+        badgeEl.textContent = 'Synthesizing SAPI…';
+        const { wavBuf, ms: ttsMs } = await synthesizeSapi(reply, targetAvatar);
+        log(`🔊 SAPI (${voiceSelectEl.value}): ${ttsMs} ms (${(wavBuf.byteLength / 1024).toFixed(1)} KB WAV)`);
+
+        await speakAudioBuffer(wavBuf, 'SAPI Reply', playAudio);
+        refreshMemoryHud(true);
+      } catch (err) {
+        if (replyBubble && replyBubble.textContent === 'Thinking…') {
+          replyBubble.parentElement?.remove();
+        }
+        log(`ERROR: ${err?.message || err}`);
+        addChatBubble('sys', null, `Error: ${err?.message || err}`);
+        badgeEl.textContent = `Ready (${gpuPrecision.toUpperCase()})`;
+      } finally {
+        busy = false;
+        btnSend.disabled = false;
+        btnVoiceAsk.disabled = false;
+        btnDemoChat.disabled = false;
+        chatInput.focus();
+      }
+    }
+
+    async function runDemoConversation(playAudio = true) {
+      if (busy) return;
+      busy = true;
+      const myDialogue = ++dialogueToken;
+      btnSend.disabled = true;
+      btnVoiceAsk.disabled = true;
+      btnDemoChat.disabled = true;
+      btnStop.disabled = false;
+
+      const customTopic = chatInput.value.trim();
+      if (customTopic) chatInput.value = '';
+      const topic = customTopic || demoTopicEl.value;
+      const topicLabel = customTopic || demoTopicEl.options[demoTopicEl.selectedIndex]?.text || topic;
+
+      addChatBubble('sys', null, `🎭 3-Turn Demo (Puck ↔ Gretchen): ${topicLabel}`);
+      log(`🎭 Starting 3-turn demo conversation on: "${topicLabel}"`);
+
+      const turns = [
+        {
+          avatar: 'puck',
+          cue: `Start a fun, casual conversation with Gretchen about ${topic}. Share one specific highlight from your own weekend and ask Gretchen what she did.`,
+        },
+        {
+          avatar: 'gretchen',
+          cue: `Respond naturally to what Puck just said about ${topic}, share a vivid detail from your own weekend, and ask Puck a quick follow-up question.`,
+        },
+        {
+          avatar: 'puck',
+          cue: `Respond warmly and wittily to Gretchen's story about ${topic} to wrap up this short chat.`,
+        },
+      ];
+
+      let replyBubble = null;
+      try {
+        for (let i = 0; i < turns.length; i++) {
+          if (myDialogue !== dialogueToken) break;
+          const { avatar: speakerKey, cue } = turns[i];
+          const persona = PERSONAS[speakerKey];
+          selectAvatar(speakerKey);
+
+          replyBubble = addChatBubble(speakerKey, `${persona.name} (Turn ${i + 1}/3)`, 'Thinking…');
+          badgeEl.textContent = `Turn ${i + 1}/3 · Thinking (${persona.name})…`;
+          refreshMemoryHud(true);
+
+          const { reply, ms: llmMs, tag } = await askLlm(speakerKey, cue, replyBubble);
+          if (myDialogue !== dialogueToken) break;
+          log(`💬 [Turn ${i + 1}/3 · ${persona.name} via ${tag}] (${llmMs.toFixed(0)}ms): ${reply}`);
+          roomHistory.push({ role: 'assistant', speaker: persona.name, text: reply });
+          refreshMemoryHud(true);
+
+          badgeEl.textContent = `Turn ${i + 1}/3 · SAPI (${persona.name})…`;
+          const { wavBuf, ms: ttsMs } = await synthesizeSapi(reply, speakerKey);
+          if (myDialogue !== dialogueToken) break;
+          log(`🔊 SAPI (${voiceSelectEl.value}): ${ttsMs} ms (${(wavBuf.byteLength / 1024).toFixed(1)} KB WAV)`);
+
+          await speakAudioBuffer(wavBuf, `Turn ${i + 1}/3 (${persona.name})`, playAudio);
+          await refreshMemoryHud(true);
+          log(`  [VRAM after Turn ${i + 1}/3] ${memVramValEl.textContent} ${memPeakValEl.textContent} (${memBreakdownEl.textContent})`);
+
+          if (myDialogue !== dialogueToken) break;
+          if (i < turns.length - 1) {
+            await new Promise(r => setTimeout(r, 350));
+          }
+        }
+        if (myDialogue === dialogueToken) {
+          addChatBubble('sys', null, '✓ 3-turn demo complete — jump right in to keep chatting with Puck & Gretchen!');
+          log('✓ 3-turn Puck ↔ Gretchen demo complete.');
+        } else {
+          addChatBubble('sys', null, '■ 3-turn demo stopped.');
+        }
+      } catch (err) {
+        if (replyBubble && replyBubble.textContent === 'Thinking…') {
+          replyBubble.parentElement?.remove();
+        }
+        log(`ERROR: ${err?.message || err}`);
+        addChatBubble('sys', null, `Error: ${err?.message || err}`);
+        badgeEl.textContent = `Ready (${gpuPrecision.toUpperCase()})`;
+      } finally {
+        busy = false;
+        btnSend.disabled = false;
+        btnVoiceAsk.disabled = false;
+        btnDemoChat.disabled = false;
+        btnStop.disabled = true;
+        chatInput.focus();
+      }
+    }
+
+    const SpeechRec = globalThis.SpeechRecognition || globalThis.webkitSpeechRecognition;
+    let recognition = null, isListening = false;
+    btnVoiceAsk.onclick = async () => {
+      if (isListening && recognition) { recognition.stop(); return; }
+      if (!SpeechRec) {
+        addChatBubble('sys', null, 'Web SpeechRecognition unavailable here — type your question or open in desktop Chrome.');
+        return;
+      }
+      recognition = new SpeechRec();
+      recognition.lang = 'en-US';
+      recognition.interimResults = true;
+      recognition.maxAlternatives = 1;
+      isListening = true;
+      btnVoiceAsk.classList.add('listening');
+      btnVoiceAsk.textContent = '🎙 Listening…';
+      badgeEl.textContent = 'Listening…';
+
+      let finalTranscript = '';
+      recognition.onresult = (event) => {
+        let interim = '';
+        for (let i = event.resultIndex; i < event.results.length; i++) {
+          const tr = event.results[i][0].transcript;
+          if (event.results[i].isFinal) finalTranscript += tr; else interim += tr;
+        }
+        chatInput.value = (finalTranscript + interim).trim();
+      };
+      recognition.onerror = (e) => log(`Voice STT error: ${e.error}`);
+      recognition.onend = async () => {
+        isListening = false;
+        btnVoiceAsk.classList.remove('listening');
+        btnVoiceAsk.textContent = '🎤 Ask';
+        badgeEl.textContent = `Ready (${gpuPrecision.toUpperCase()})`;
+        const spoken = chatInput.value.trim();
+        if (spoken) await handleUserQuestion(spoken, true);
+      };
+      recognition.start();
+    };
+
+    btnSend.onclick = () => handleUserQuestion(chatInput.value, true);
+    chatInput.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); handleUserQuestion(chatInput.value, true); }
+    });
+    btnClearChat.onclick = () => {
+      roomHistory = [];
+      nanoSessions = {};
+      chatBox.innerHTML = '<div class="msg sys">Conversation cleared.</div>';
+    };
+
+    btnPuck.onclick = () => selectAvatar('puck');
+    btnGretchen.onclick = () => selectAvatar('gretchen');
+    btnStop.onclick = () => { dialogueToken++; stopPlayback(); };
+    btnDemoChat.onclick = () => runDemoConversation(true);
+    btnPlayPuck.onclick = async () => {
+      selectAvatar('puck');
+      await speakAudioBuffer(await (await fetch('/web/samples/puck_demo.wav')).arrayBuffer(), 'puck_demo.wav', true);
+    };
+    btnPlayGretchen.onclick = async () => {
+      selectAvatar('gretchen');
+      await speakAudioBuffer(await (await fetch('/web/samples/gretchen_demo.wav')).arrayBuffer(), 'gretchen_demo.wav', true);
+    };
+    audioFile.onchange = async () => {
+      if (audioFile.files?.length) await speakAudioBuffer(await audioFile.files[0].arrayBuffer(), audioFile.files[0].name, true);
+    };
+
+    // =========================================================================
+    // Boot: Auto-load Avatar + Auto-load In-Browser LLM in parallel!
+    // =========================================================================
+    (async () => {
+      try {
+        if (location.protocol === 'file:') {
+          badgeEl.textContent = 'Run Start_Studio.bat';
+          setLlmPill('Use Start_Studio.bat', 'warn');
+          addChatBubble('sys', null, 'Opened via file:// — double-click Start_Studio.bat in the project folder to launch the local studio in Google Chrome automatically (zero terminal window).');
+          log('Opened directly via file://. Please double-click Start_Studio.bat in the repo root (or run: cd web && node server.mjs) and open http://127.0.0.1:8765/ in Google Chrome.');
+          return;
+        }
+        const params = new URLSearchParams(location.search);
+        if (params.get('precision') === 'fp16') {
+          gpuPrecision = 'fp16';
+          precisionSelectEl.value = 'fp16';
+        }
+        if (params.get('llm')) {
+          llmBackendEl.value = params.get('llm');
+        }
+
+        await detectGeminiNano();
+        if (params.get('autotest') === 'nano') {
+          fetch('/api/telemetry', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ phase: 'boot', nanoStatus, backend: llmBackendEl.value, ua: navigator.userAgent, brands: navigator.userAgentData?.brands || [] }),
+          }).catch(() => {});
+        }
+
+        if (!isWebGPUSupported()) throw new Error('WebGPU is not supported in this browser.');
+        const adapter = await navigator.gpu.requestAdapter();
+        log(`WebGPU: ${adapter?.info?.vendor || ''} ${adapter?.info?.architecture || ''}`);
+
+        const t0 = performance.now();
+        await loadLiteRt('/web/node_modules/@litertjs/core/wasm/', { jspi: true });
+
+        badgeEl.textContent = 'Loading 3 FP16-weight .tflite models…';
+        [w2vBytes, fmBytes, rendBytes, blinkDelta] = await Promise.all([
+          fetchBytes('/wav2vec2_2s_fp16w.tflite'),
+          fetchBytes('/fm_step_fp16w.tflite'),
+          fetchBytes('/renderer_decode_fp16w.tflite'),
+          fetchF32('/avatars/blink_delta.bin'),
+        ]);
+        const totMb = (w2vBytes.byteLength + fmBytes.byteLength + rendBytes.byteLength) / 1048576;
+        log(`✓ Loaded 3 FP16-weight .tflite models (${totMb.toFixed(1)} MB)`);
+
+        badgeEl.textContent = 'Loading avatars…';
+        avatars.puck = await loadAvatarCache('puck');
+        avatars.gretchen = await loadAvatarCache('gretchen');
+        selectAvatar('puck');
+
+        badgeEl.textContent = `Compiling all 3 WebGPU models (${gpuPrecision.toUpperCase()})…`;
+        await loadAllAvatarModelsOnce();
+        await renderOneFrame(avatars.puck, avatars.puck.t_r);
+
+        // Pre-warm default LLM automatically on boot!
+        if (llmBackendEl.value === 'nano' && (nanoStatus === 'available' || nanoStatus === 'readily')) {
+          badgeEl.textContent = 'Pre-warming Gemini Nano…';
+          const tNano = performance.now();
+          try {
+            await getOrCreateNanoSession(activeAvatarName);
+            log(`✓ Chrome Gemini Nano pre-warmed (${(performance.now() - tNano).toFixed(0)} ms)`);
+          } catch (e) {
+            log(`⚠️ Gemini Nano pre-warm warning: ${e?.message || e} (will retry on Send)`);
+            setLlmPill('Nano: Retry on Send', 'warn');
+          }
+        } else if (llmBackendEl.value.startsWith('webllm:')) {
+          const mid = llmBackendEl.value.slice('webllm:'.length);
+          badgeEl.textContent = 'Loading In-Browser LLM…';
+          await ensureWebLlm(mid);
+        }
+
+        log(`✓ 100% Browser-Local Studio ready in ${((performance.now() - t0) / 1000).toFixed(2)}s!`);
+        badgeEl.textContent = `Ready (${gpuPrecision.toUpperCase()})`;
+        peakVramGb = 0;
+        await refreshMemoryHud(true);
+        setTimeout(() => { peakVramGb = 0; refreshMemoryHud(true); }, 1200);
+
+        [btnPuck, btnGretchen, btnSend, btnVoiceAsk, btnDemoChat, btnPlayPuck, btnPlayGretchen, chatInput].forEach(el => el.disabled = false);
+
+        if (params.get('autotest') === 'dialogue') {
+          await runDemoConversation(false);
+          log('=== DIALOGUE E2E VERIFIED ===');
+        } else if (params.get('autotest') === 'webllm') {
+          await handleUserQuestion('Hey Gretchen, introduce yourself to Puck in one short friendly sentence.', false);
+          log('=== WEBLLM E2E VERIFIED ===');
+        } else if (params.get('autotest') === 'nano') {
+          await handleUserQuestion('Hey Gretchen, introduce yourself to Puck in one short friendly sentence.', false);
+          log('=== NANO E2E VERIFIED ===');
+          try {
+            await fetch('/api/telemetry', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                test: 'nano',
+                precision: gpuPrecision,
+                ua: navigator.userAgent,
+                brands: navigator.userAgentData?.brands || [],
+                nanoStatus,
+                backend: llmBackendEl.value,
+                metrics: { llm: mLlm.textContent, tts: mTts.textContent, motion: mMotion.textContent, rend: mRend.textContent },
+                log: logEl.textContent,
+              }),
+            });
+          } catch {}
+        }
+      } catch (err) {
+        log(`ERROR: ${err?.stack || err}`);
+        badgeEl.textContent = 'Error';
+        if (new URLSearchParams(location.search).get('autotest') === 'nano') {
+          try {
+            await fetch('/api/telemetry', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ test: 'nano', error: String(err?.stack || err), log: logEl.textContent }),
+            });
+          } catch {}
+        }
+      }
+    })();
+  </script>
+</body>
+</html>

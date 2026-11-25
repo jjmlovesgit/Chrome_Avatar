@@ -1,0 +1,18 @@
+# Large exported model binaries (>100 MB; generate via C++ exporters in README)
+*.tflite
+*.safetensors
+*.pt
+*.pth
+*.onnx
+
+# Dependencies & scratch verification dumps
+node_modules/
+web/node_modules/
+ref_data/
+ref_renderer/
+ref_wav2vec2/
+*.log
+.server.pid
+web/.server.pid
+.DS_Store
+Thumbs.db

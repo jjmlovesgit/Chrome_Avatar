@@ -1,0 +1,154 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>IMTalker fm_step.tflite — LiteRT.js WebGPU Benchmark</title>
+  <style>
+    body { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; background: #0f121a; color: #e6edf3; padding: 24px; max-width: 960px; margin: 0 auto; }
+    h1 { font-size: 20px; color: #79c0ff; margin-bottom: 8px; }
+    .sub { color: #8b949e; margin-bottom: 18px; }
+    pre { background: #161b22; border: 1px solid #30363d; border-radius: 8px; padding: 16px; white-space: pre-wrap; line-height: 1.5; font-size: 13px; }
+    .ok { color: #3fb950; }
+    .warn { color: #d29922; }
+    .err { color: #f85149; }
+  </style>
+  <script type="importmap">
+    {
+      "imports": {
+        "@litertjs/core": "/web/node_modules/@litertjs/core/dist/index.js",
+        "@litertjs/wasm-utils": "/web/node_modules/@litertjs/wasm-utils/dist/index.js"
+      }
+    }
+  </script>
+</head>
+<body>
+  <h1>IMTalker Flow-Matching Transformer (fm_step.tflite) — LiteRT.js Benchmark</h1>
+  <div class="sub">Exported natively in C++ from checkpoints/generator.safetensors via LiteRT Tensor API (no Python converter)</div>
+  <pre id="log">Initializing...\n</pre>
+
+  <script type="module">
+    import { loadLiteRt, loadAndCompile, Tensor, isWebGPUSupported } from '@litertjs/core';
+
+    const logEl = document.getElementById('log');
+    const log = (msg) => { logEl.textContent += msg + '\n'; console.log(msg); };
+
+    async function fetchF32(url) {
+      const r = await fetch(url);
+      if (!r.ok) throw new Error(`HTTP ${r.status} for ${url}`);
+      return new Float32Array(await r.arrayBuffer());
+    }
+
+    function compareArrays(a, b) {
+      let maxAbs = 0, sumAbs = 0, dot = 0, na = 0, nb = 0;
+      for (let i = 0; i < b.length; i++) {
+        const va = a[i], vb = b[i];
+        const err = Math.abs(va - vb);
+        if (err > maxAbs) maxAbs = err;
+        sumAbs += err;
+        dot += va * vb;
+        na += va * va;
+        nb += vb * vb;
+      }
+      return {
+        maxAbs,
+        meanAbs: sumAbs / b.length,
+        cosSim: dot / (Math.sqrt(na) * Math.sqrt(nb) + 1e-12),
+      };
+    }
+
+    async function benchConfig(label, modelBytes, refs, compileOpts) {
+      log(`\n--- ${label} ---`);
+      const tComp0 = performance.now();
+      const model = await loadAndCompile(modelBytes, compileOpts);
+      const compMs = performance.now() - tComp0;
+      log(`Compiled in ${compMs.toFixed(1)} ms`);
+      log(`Inputs:  ${model.getInputDetails().map(d => `${d.name}[${d.shape}]`).join(', ')}`);
+      log(`Outputs: ${model.getOutputDetails().map(d => `${d.name}[${d.shape}]`).join(', ')}`);
+
+      const runOne = async (tVal, xArr, condArr, cfgVal) => {
+        const inputs = {
+          t: new Tensor(tVal, [1]),
+          x_in: new Tensor(xArr, [2, 60, 64]),
+          cond_in: new Tensor(condArr, [2, 60, 32]),
+          cfg_scale: new Tensor(cfgVal, [1]),
+        };
+        const outputs = await model.run(inputs);
+        const outTensor = outputs.velocity ?? Object.values(outputs)[0];
+        const hostOut = outTensor.accelerator === 'webgpu' ? await outTensor.moveTo('wasm') : outTensor;
+        const arr = new Float32Array(hostOut.toTypedArray());
+        if (hostOut !== outTensor) hostOut.delete();
+        for (const k of Object.keys(inputs)) inputs[k].delete();
+        for (const k of Object.keys(outputs)) outputs[k].delete();
+        return arr;
+      };
+
+      // Warmup + golden parity check
+      const tW0 = performance.now();
+      const vel = await runOne(refs.t, refs.x_in, refs.cond_in, refs.cfg_scale);
+      const warmMs = performance.now() - tW0;
+      const stats = compareArrays(vel, refs.vel_ref);
+      log(`Warmup + Parity: ${warmMs.toFixed(2)} ms | cos_sim=${stats.cosSim.toFixed(8)} | mean_abs_err=${stats.meanAbs.toFixed(6)} | max_abs_err=${stats.maxAbs.toFixed(6)}`);
+
+      // Benchmark 6-step Euler ODE loop (2.0 s audio chunk)
+      const stepTimes = [];
+      const tOde0 = performance.now();
+      for (let step = 0; step < 6; step++) {
+        const ts = performance.now();
+        await runOne(new Float32Array([step / 5.0]), refs.x_in, refs.cond_in, refs.cfg_scale);
+        stepTimes.push(performance.now() - ts);
+      }
+      const odeMs = performance.now() - tOde0;
+      const avgStep = stepTimes.reduce((a, b) => a + b, 0) / stepTimes.length;
+      const rtf = (odeMs / 1000) / 2.0;
+      log(`6-Step ODE (2.0s clip): total=${odeMs.toFixed(2)} ms | avg_step=${avgStep.toFixed(2)} ms | RTF=${rtf.toFixed(4)} (${(1 / rtf).toFixed(1)}x realtime)`);
+      log(`Per-step ms: [${stepTimes.map(v => v.toFixed(1)).join(', ')}]`);
+
+      model.delete();
+      return { label, compMs, warmMs, odeMs, avgStep, rtf, stats };
+    }
+
+    (async () => {
+      try {
+        log(`WebGPU supported: ${isWebGPUSupported()}`);
+        if (navigator.gpu) {
+          const adapter = await navigator.gpu.requestAdapter();
+          if (adapter?.info) {
+            log(`WebGPU Adapter: ${adapter.info.vendor} ${adapter.info.architecture} ${adapter.info.description || ''}`);
+          }
+        }
+
+        const tBoot0 = performance.now();
+        await loadLiteRt('/web/node_modules/@litertjs/core/wasm/', { jspi: true });
+        log(`LiteRT.js runtime loaded (JSPI) in ${(performance.now() - tBoot0).toFixed(1)} ms`);
+
+        const tFetch0 = performance.now();
+        const [modelResp, t, x_in, cond_in, cfg_scale, vel_ref] = await Promise.all([
+          fetch('/fm_step.tflite'),
+          fetchF32('/ref_data/t.bin'),
+          fetchF32('/ref_data/x_in.bin'),
+          fetchF32('/ref_data/cond_in.bin'),
+          fetchF32('/ref_data/cfg_scale.bin'),
+          fetchF32('/ref_data/vel_ref.bin'),
+        ]);
+        const modelBytes = new Uint8Array(await modelResp.arrayBuffer());
+        log(`Loaded fm_step.tflite (${(modelBytes.byteLength / 1048576).toFixed(2)} MB) + ref tensors in ${(performance.now() - tFetch0).toFixed(1)} ms`);
+
+        const refs = { t, x_in, cond_in, cfg_scale, vel_ref };
+        const results = [];
+
+        if (isWebGPUSupported()) {
+          results.push(await benchConfig('WebGPU (FP16)', modelBytes, refs, { accelerator: 'webgpu', gpuOptions: { precision: 'fp16' } }));
+          results.push(await benchConfig('WebGPU (FP32)', modelBytes, refs, { accelerator: 'webgpu', gpuOptions: { precision: 'fp32' } }));
+        }
+        results.push(await benchConfig('WASM (CPU)', modelBytes, refs, { accelerator: 'wasm' }));
+
+        window.__BENCH_RESULTS = results;
+        log('\n=== BENCHMARK COMPLETE ===');
+      } catch (err) {
+        log(`\nERROR: ${err?.stack || err}`);
+        window.__BENCH_ERROR = String(err?.stack || err);
+      }
+    })();
+  </script>
+</body>
+</html>

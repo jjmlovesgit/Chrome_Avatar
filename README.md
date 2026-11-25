@@ -102,20 +102,23 @@ Chrome_Avatar/
 ### Prerequisites
 - **Windows 10/11** with **Node.js 20+** and a **WebGPU-capable GPU**
 - **Google Chrome** (for built-in **Gemini Nano** Prompt API — default) or any WebGPU browser (automatically supports **WebLLM** `Llama 3.2 1B` / `Gemma 2 2B` / `Qwen 2.5 1.5B`)
-- The 3 exported FP16-weight `.tflite` models placed in the repository root *(excluded from git due to GitHub's 100 MB file limit; see [Exporting the Models](#exporting-the-3-tflite-models-native-windows-c) below)*:
-  - `wav2vec2_2s_fp16w.tflite` (`180.4 MB`)
-  - `fm_step_fp16w.tflite` (`74.3 MB`)
-  - `renderer_decode_fp16w.tflite` (`143.1 MB`)
+- **Zero manual model builds required:** All 3 pre-exported FP16-weight `.tflite` models (`397.7 MB` total) are hosted on [**Release `v1.0.0`**](https://github.com/jjmlovesgit/Chrome_Avatar/releases/tag/v1.0.0) and **download automatically on first launch** when you run `Start_Studio.bat`!
+  - [`wav2vec2_2s_fp16w.tflite`](https://github.com/jjmlovesgit/Chrome_Avatar/releases/download/v1.0.0/wav2vec2_2s_fp16w.tflite) (`180.4 MB`)
+  - [`fm_step_fp16w.tflite`](https://github.com/jjmlovesgit/Chrome_Avatar/releases/download/v1.0.0/fm_step_fp16w.tflite) (`74.3 MB`)
+  - [`renderer_decode_fp16w.tflite`](https://github.com/jjmlovesgit/Chrome_Avatar/releases/download/v1.0.0/renderer_decode_fp16w.tflite) (`143.1 MB`)
 
-### 1. One-Click Launch (Recommended — Zero Terminal Window)
+### 1. Clone & One-Click Launch (Recommended — Turnkey, Zero Terminal Window)
 
-Double-click **`Start_Studio.bat`** in the repository root:
-- Automatically runs `npm install` inside `web/` on the first launch.
-- Starts `node server.mjs` **completely hidden in the background** (no terminal window left open).
-- Waits until `http://127.0.0.1:8765/` is ready and opens **Google Chrome** directly to the studio.
-- When you're done, double-click **`Stop_Studio.bat`** to cleanly shut down the background server and its SAPI/VRAM workers.
+```powershell
+git clone https://github.com/jjmlovesgit/Chrome_Avatar.git
+```
 
-*(Want to run manually in a terminal instead? Run `cd web && npm install && node server.mjs`, then open http://127.0.0.1:8765/ in Google Chrome.)*
+Then double-click **`Start_Studio.bat`** in the `Chrome_Avatar` folder:
+- **First run only:** Automatically downloads the 3 FP16-weight `.tflite` models (`397.7 MB` total) from GitHub Release `v1.0.0` and runs `npm install` inside `web/`.
+- **Every launch:** Starts `node server.mjs` **completely hidden in the background** (no terminal window left open), waits for `http://127.0.0.1:8765/`, and opens **Google Chrome** directly to the studio.
+- **Clean shutdown:** Double-click **`Stop_Studio.bat`** anytime to stop the hidden background server and its SAPI/VRAM workers.
+
+*(Want to run manually in a terminal instead? Download the 3 `.tflite` files from [Release `v1.0.0`](https://github.com/jjmlovesgit/Chrome_Avatar/releases/tag/v1.0.0) into the repo root, run `cd web && npm install && node server.mjs`, and open http://127.0.0.1:8765/ in Google Chrome.)*
 
 ### 2. Why Is `node server.mjs` Needed If All AI Runs in Chrome?
 

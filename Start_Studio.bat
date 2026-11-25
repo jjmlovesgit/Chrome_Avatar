@@ -3,8 +3,26 @@ setlocal
 set "ROOT=%~dp0"
 set "WEB=%ROOT%web"
 set "URL=http://127.0.0.1:8765/"
+set "REL_BASE=https://github.com/jjmlovesgit/Chrome_Avatar/releases/download/v1.0.0"
 
-REM First-run dependency install (only shows briefly if node_modules is missing)
+REM 1. Auto-download any missing FP16-weight .tflite models from GitHub Release v1.0.0 (first run only)
+for %%F in (wav2vec2_2s_fp16w.tflite fm_step_fp16w.tflite renderer_decode_fp16w.tflite) do (
+  if not exist "%ROOT%%%F" (
+    echo Downloading %%F from GitHub Release v1.0.0...
+    curl.exe -L --fail --progress-bar -o "%ROOT%%%F.part" "%REL_BASE%/%%F"
+    if errorlevel 1 (
+      del /q "%ROOT%%%F.part" 2>nul
+      echo.
+      echo ERROR: Failed to download %%F. Please check your internet connection or download manually from:
+      echo   %REL_BASE%/%%F
+      pause
+      exit /b 1
+    )
+    move /y "%ROOT%%%F.part" "%ROOT%%%F" >nul
+  )
+)
+
+REM 2. First-run npm install (only runs if web\node_modules is missing)
 if not exist "%WEB%\node_modules" (
   echo First run detected - installing LiteRT.js and WebLLM packages...
   pushd "%WEB%"
@@ -12,7 +30,7 @@ if not exist "%WEB%\node_modules" (
   popd
 )
 
-REM Launch hidden node server.mjs (unless port 8765 is already listening) and open Google Chrome
+REM 3. Launch hidden node server.mjs (unless port 8765 is already listening) and open Google Chrome
 powershell -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -Command ^
   "$web = '%WEB%'; $url = '%URL%'; $pidFile = Join-Path $web '.server.pid';" ^
   "$up = $false; try { $c = New-Object Net.Sockets.TcpClient('127.0.0.1', 8765); $c.Close(); $up = $true } catch {}" ^

@@ -1,5 +1,6 @@
-# Large exported model binaries (>100 MB; generate via C++ exporters in README)
+# Large exported model binaries (>100 MB; auto-downloaded from Release v1.0.0 by Start_Studio.bat)
 *.tflite
+*.tflite.part
 *.safetensors
 *.pt
 *.pth

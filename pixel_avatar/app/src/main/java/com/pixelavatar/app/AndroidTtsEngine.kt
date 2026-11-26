@@ -12,6 +12,8 @@ import com.google.mlkit.genai.texttospeech.SpeechSynthesizer
 import com.google.mlkit.genai.texttospeech.SpeechSynthesizerOptions
 import com.google.mlkit.genai.texttospeech.VoiceInfo
 import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import java.io.File
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
@@ -80,6 +82,7 @@ class AndroidTtsEngine(private val context: Context) {
 
     private val readyDeferred = CompletableDeferred<Boolean>()
     private val pending = mutableMapOf<String, CompletableDeferred<Boolean>>()
+    private val synthMutex = Mutex()
 
     init {
         // Explicitly bind to Google Speech Services (com.google.android.tts) where ML Kit GenAI voices live
@@ -263,14 +266,16 @@ class AndroidTtsEngine(private val context: Context) {
         android.util.Log.i("PixelAvatar", "Selected local voices: Puck=$puckVoiceName | Gretchen=$gretchenVoiceName")
     }
 
-    suspend fun synthesize(text: String, avatarKey: String): TtsAudio {
+    suspend fun synthesize(text: String, avatarKey: String): TtsAudio = synthMutex.withLock {
         val ok = readyDeferred.await()
         val engine = requireNotNull(tts) { "Android TTS not initialized" }
         require(ok) { "Android TTS initialization failed" }
 
         val isGretchen = avatarKey == "gretchen"
         val voice = if (isGretchen) gretchenVoice else puckVoice
-        if (voice != null) runCatching { engine.voice = voice }
+        if (voice != null) {
+            runCatching { engine.voice = voice }
+        }
 
         // Keep natural 1.0 pitch for Google SEANet & GenAI voices so prosody stays clean and unwarped!
         engine.setPitch(1.0f)
@@ -286,6 +291,7 @@ class AndroidTtsEngine(private val context: Context) {
             putString("com.google.android.tts:DisableVoiceFallback", "false")
         }
 
+        android.util.Log.i("PixelAvatar", "TTS synth [$avatarKey] voice=${voice?.name ?: "default"}")
         val t0 = System.nanoTime()
         val res = engine.synthesizeToFile(text, params, outFile, uttId)
         require(res == TextToSpeech.SUCCESS) { "TTS synthesizeToFile returned $res" }
@@ -295,7 +301,7 @@ class AndroidTtsEngine(private val context: Context) {
 
         val decoded = decodeWavTo16kMono(outFile)
         outFile.delete()
-        return TtsAudio(
+        return@withLock TtsAudio(
             wavFile = outFile,
             pcm16k = decoded.pcm16k,
             durationSec = decoded.durationSec,

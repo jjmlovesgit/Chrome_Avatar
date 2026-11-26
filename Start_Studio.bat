@@ -6,7 +6,7 @@ set "URL=http://127.0.0.1:8765/"
 set "REL_BASE=https://github.com/jjmlovesgit/Chrome_Avatar/releases/download/v1.0.0"
 
 REM 1. Auto-download any missing FP16-weight .tflite models from GitHub Release v1.0.0 (first run only)
-for %%F in (wav2vec2_2s_fp16w.tflite fm_step_fp16w.tflite student_renderer_256_fp16w.tflite renderer_decode_fp16w.tflite) do (
+for %%F in (wav2vec2_2s_fp16w.tflite fm_step_fp16w.tflite student_renderer_512_fp16w.tflite student_renderer_256_fp16w.tflite renderer_decode_fp16w.tflite) do (
   if not exist "%ROOT%%%F" (
     echo Downloading %%F from GitHub Release v1.0.0...
     curl.exe -L --fail --progress-bar -o "%ROOT%%%F.part" "%REL_BASE%/%%F"

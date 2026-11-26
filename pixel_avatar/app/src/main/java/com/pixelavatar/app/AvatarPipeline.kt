@@ -25,7 +25,8 @@ data class AvatarCache(
     val tR: FloatArray,
     val featureBuffers: List<FloatArray>, // exact order matching renderer_decode inputs [1..11]
     val portrait: Bitmap,
-    val portrait256Rgb: FloatArray,       // [256 * 256 * 3] NHWC float in [0, 1] for 2-input mobile student
+    val portrait256Rgb: FloatArray,       // [256 * 256 * 3] NHWC float in [0, 1] for 256px student
+    val portrait512Rgb: FloatArray,       // [512 * 512 * 3] NHWC float in [0, 1] for native 512px HD student v2
 )
 
 data class PrevState(
@@ -50,7 +51,8 @@ class AvatarPipeline(private val context: Context) {
     companion object {
         const val MODEL_W2V = "wav2vec2_2s_fp16w.tflite"
         const val MODEL_FM = "fm_step_fp16w.tflite"
-        const val MODEL_REND = "student_renderer_256_fp16w.tflite"
+        const val MODEL_REND = "student_renderer_512_fp16w.tflite"
+        private const val MODEL_REND_256 = "student_renderer_256_fp16w.tflite"
         private const val MODEL_REND_HD = "renderer_decode_hd_fast.tflite"
         private const val MODEL_REND_LEGACY = "renderer_decode_fp16w.tflite"
 
@@ -100,7 +102,7 @@ class AvatarPipeline(private val context: Context) {
 
     fun resolveRendererFile(): File {
         val dir = modelsDir()
-        for (name in listOf(MODEL_REND, MODEL_REND_HD, MODEL_REND_LEGACY)) {
+        for (name in listOf(MODEL_REND, MODEL_REND_256, MODEL_REND_HD, MODEL_REND_LEGACY)) {
             val f = File(dir, name)
             if (f.exists() && f.length() >= 1_000_000L) return f
         }
@@ -145,7 +147,17 @@ class AvatarPipeline(private val context: Context) {
             rgb256[b + 1] = ((c shr 8) and 0xFF) / 255f
             rgb256[b + 2] = (c and 0xFF) / 255f
         }
-        return AvatarCache(key, displayName, tR, feats, scaled, rgb256)
+        val px512 = IntArray(512 * 512)
+        scaled.getPixels(px512, 0, 512, 0, 0, 512, 512)
+        val rgb512 = FloatArray(512 * 512 * 3)
+        for (i in px512.indices) {
+            val c = px512[i]
+            val b = i * 3
+            rgb512[b] = ((c shr 16) and 0xFF) / 255f
+            rgb512[b + 1] = ((c shr 8) and 0xFF) / 255f
+            rgb512[b + 2] = (c and 0xFF) / 255f
+        }
+        return AvatarCache(key, displayName, tR, feats, scaled, rgb256, rgb512)
     }
 
     private fun readAssetFloats(assetPath: String): FloatArray {
@@ -264,8 +276,9 @@ class AvatarPipeline(private val context: Context) {
     fun bindAvatarToRenderer(avatar: AvatarCache) {
         if (boundAvatarKey == avatar.key) return
         if (rendIn.size == 2) {
-            // Lightweight 2-input mobile student renderer: [t_c, src_img]
-            rendIn[1].writeFloat(avatar.portrait256Rgb)
+            // 2-input distilled student renderer: [t_c, src_img] (auto-selects 512px HD v2 or 256px v1)
+            if (renderSide == 512) rendIn[1].writeFloat(avatar.portrait512Rgb)
+            else rendIn[1].writeFloat(avatar.portrait256Rgb)
         } else {
             // Full 12-input IMTalker teacher renderer: [t_c, i_r, ma_r_0..3, f_r_0..5]
             for (i in avatar.featureBuffers.indices) {

@@ -178,7 +178,8 @@
           <label style="font-size:12px; color:#8b949e; display:inline-flex; align-items:center; gap:5px;">
             Renderer:
             <select id="rendererSelect">
-              <option value="student">256² Mobile Student (6.7 MB · Ultra-Fast)</option>
+              <option value="student512">512² HD Student v2 (11.4 MB · Default)</option>
+              <option value="student">256² Mobile Student v1 (6.7 MB · Ultra-Fast)</option>
               <option value="teacher">512² HD Teacher (143 MB · 63.6 dB)</option>
             </select>
           </label>
@@ -457,7 +458,7 @@
     ];
 
     let gpuPrecision = 'fp32';
-    let rendererMode = 'student'; // 'student' (6.74 MB 256x256 ultra-fast) or 'teacher' (143 MB 512x512 HD)
+    let rendererMode = 'student512'; // 'student512' (11.4 MB 512px HD v2), 'student' (6.74 MB 256px), or 'teacher' (143 MB 512px)
     const getWebGpuOpts = () => ({ accelerator: 'webgpu', gpuOptions: { precision: gpuPrecision } });
 
     let w2vBytes = null, fmBytes = null, rendBytes = null;
@@ -828,7 +829,8 @@
       const t3 = performance.now();
       rendModel = await loadAndCompile(rendBytes, getWebGpuOpts());
       rendBytes = null;
-      const rendName = rendererMode === 'student' ? 'student_renderer_256' : 'renderer_decode';
+      const rendName = rendererMode === 'student512' ? 'student_renderer_512'
+                     : rendererMode === 'student' ? 'student_renderer_256' : 'renderer_decode';
       log(`  [resident] ${rendName} (${gpuPrecision.toUpperCase()}) compiled (${(performance.now() - t3).toFixed(0)} ms)`);
     }
 
@@ -983,10 +985,25 @@
       img.src = `${base}/portrait.png`;
       await img.decode();
 
-      // Build lightweight [1, 256, 256, 3] NHWC WebGPU tensor for the 6.74 MB mobile student
+      // Build lightweight [1, S, S, 3] NHWC WebGPU tensor for 2-input student (512px HD v2 or 256px v1)
       let srcImgGpu = null;
       const gpuTensors = {};
-      if (rendererMode === 'student') {
+      if (rendererMode === 'student512') {
+        const c512 = document.createElement('canvas');
+        c512.width = 512; c512.height = 512;
+        const x512 = c512.getContext('2d');
+        x512.drawImage(img, 0, 0, 512, 512);
+        const px = x512.getImageData(0, 0, 512, 512).data;
+        const rgb = new Float32Array(512 * 512 * 3);
+        for (let i = 0; i < 512 * 512; i++) {
+          rgb[i * 3 + 0] = px[i * 4 + 0] / 255.0;
+          rgb[i * 3 + 1] = px[i * 4 + 1] / 255.0;
+          rgb[i * 3 + 2] = px[i * 4 + 2] / 255.0;
+        }
+        const cpuSrc = new Tensor(rgb, [1, 512, 512, 3]);
+        srcImgGpu = await cpuSrc.moveTo('webgpu');
+        cpuSrc.delete();
+      } else if (rendererMode === 'student') {
         tmpCtx256.drawImage(img, 0, 0, 256, 256);
         const px = tmpCtx256.getImageData(0, 0, 256, 256).data;
         const rgb = new Float32Array(256 * 256 * 3);
@@ -1165,7 +1182,7 @@
     async function renderOneFrame(avatar, token32) {
       const t0 = performance.now();
       const tcT = new Tensor(token32, [1, 32]);
-      const inputs = (rendererMode === 'student')
+      const inputs = (rendererMode === 'student' || rendererMode === 'student512')
         ? { t_c: tcT, src_img: avatar.srcImgGpu }
         : { t_c: tcT, ...avatar.gpuTensors };
       const outs = await rendModel.run(inputs);
@@ -1528,9 +1545,11 @@
           gpuPrecision = 'fp16';
           precisionSelectEl.value = 'fp16';
         }
-        rendererMode = (params.get('renderer') === 'teacher') ? 'teacher' : 'student';
+        const rParam = params.get('renderer');
+        rendererMode = (rParam === 'teacher' || rParam === 'student' || rParam === 'student512') ? rParam : 'student512';
         rendererSelectEl.value = rendererMode;
-        mRendLabelEl.textContent = rendererMode === 'student' ? 'Student 256²' : 'Teacher 512²';
+        mRendLabelEl.textContent = rendererMode === 'student512' ? 'Student 512²'
+                                 : rendererMode === 'student' ? 'Student 256²' : 'Teacher 512²';
         if (params.get('llm')) {
           llmBackendEl.value = params.get('llm');
         } else if (params.get('autotest') === 'pixel') {
@@ -1576,7 +1595,9 @@
         const t0 = performance.now();
         await loadLiteRt('/web/node_modules/@litertjs/core/wasm/', { jspi: true });
 
-        const rendUrl = rendererMode === 'student' ? '/student_renderer_256_fp16w.tflite' : '/renderer_decode_fp16w.tflite';
+        const rendUrl = rendererMode === 'student512' ? '/student_renderer_512_fp16w.tflite'
+                      : rendererMode === 'student' ? '/student_renderer_256_fp16w.tflite'
+                      : '/renderer_decode_fp16w.tflite';
         badgeEl.textContent = `Loading 3 .tflite models (${rendererMode})…`;
         [w2vBytes, fmBytes, rendBytes, blinkDelta] = await Promise.all([
           fetchBytes('/wav2vec2_2s_fp16w.tflite'),

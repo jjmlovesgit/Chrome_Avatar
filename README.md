@@ -1,10 +1,11 @@
 # Chrome Avatar (+ Pixel 10 Native) — 100% Local 512×512 AI Avatar Studio (LiteRT + Gemini Nano)
 
-Real-time **conversational talking-head avatars** (**Puck** & **Gretchen**) powered by **one single C++ LiteRT Tensor API pipeline** running **100% locally** in two form factors:
+Real-time **native 512×512 conversational talking-head avatars** (**Puck** & **Gretchen**) powered by **one single C++ LiteRT Tensor API pipeline** running **100% locally** in two form factors:
 1. **Desktop Chrome WebGPU Studio (`web/`):** **Chrome Built-in Gemini Nano** (or in-browser **WebLLM**) + warm Windows SAPI Natural HD voices (`0 GB` VRAM) + **LiteRT.js (`@litertjs/core`) WebGPU** with a live **`Renderer` switcher**:
-   - **Default — `256² Mobile Student (6.74 MB)`:** **`161–186 FPS`** (`5.4–6.2 ms/frame`), **`~0.98 GB` WebGPU VRAM** (`3.1×` less VRAM & `3.6×–4.1×` faster than Teacher), **`1.17 s` boot** (`33–36 ms` renderer compile)!
-   - **Optional — `512² HD Teacher (143.1 MB)`:** **`44.5–54.6 FPS`** (`19.6–22.5 ms/frame`, `63.6 dB` parity) with **`0.00 GB` VRAM drift**.
-2. **Native Android / Google Pixel 10 Studio (`pixel_avatar/`):** **100% offline** Kotlin + Jetpack Compose app using **LiteRT `2.3.0` (`WGPU-FP16`)** + **Pixel 10 AICore Gemini Nano** (`genai-prompt` with parallel warmup, streaming, and pipelined `0.2 s` turn handoffs) + **offline Android Neural TTS** + the exact same **distilled `6.74 MB` FiLM Mobile U-Net Student (`21×` smaller than teacher!)** — **`33–42 FPS` (`23–30 ms/frame`)** real-time talking heads (`25×–32×` faster than mobile Chrome WebGPU!), **`~850 MB` App RAM**, **`0 s` turn buffering**, hardware-clock audio-locked lip-sync.
+   - **Default — `512² HD Student v2 (11.39 MB)`:** **`74–88 FPS`** (`11.4–13.5 ms/frame`), **`0.97–1.02 GB` WebGPU VRAM** (`38.19 dB` unseen 512px PSNR, `2.44/255` MouthMAE, `51–59 ms` compile)!
+   - **Ultra-Fast — `256² Mobile Student v1 (6.74 MB)`:** **`161–186 FPS`** (`5.4–6.2 ms/frame`), **`0.98 GB` WebGPU VRAM**, `33–36 ms` compile.
+   - **Reference — `512² HD Teacher (143.1 MB)`:** **`44.5–54.6 FPS`** (`19.6–22.5 ms/frame`, `63.6 dB` parity) with **`0.00 GB` VRAM drift**.
+2. **Native Android / Google Pixel 10 Studio (`pixel_avatar/`):** **100% offline** Kotlin + Jetpack Compose app using **LiteRT `2.3.0` (`WGPU-FP16`)** + **Pixel 10 AICore Gemini Nano** (`genai-prompt` with parallel warmup, streaming, and pipelined `0.2 s` turn handoffs) + **offline Android Neural TTS** (`AudioTrack` hardware DAC `AudioTimestamp` lip-sync, `~8–9 ms` sync error!) + the exact same **distilled `11.39 MB` Native `512×512` HD Student v2 (`12.6×` smaller than teacher!)** — **`26.1 FPS` (`38.3 ms/frame`)** real-time native 512×512 talking heads (`19.6×` faster than mobile Chrome WebGPU; optional `6.74 MB` 256² v1 runs at `33–42 FPS`).
 
 No Python inference server. No PyTorch runtime. No cloud LLM APIs. Built natively on Windows (VS 2022 MSVC + CMake, zero WSL).
 
@@ -61,9 +62,10 @@ Measured live via Windows GPU Process Memory (`Win32_PerfFormattedData_GPUPerfor
 | --- | --- | --- | --- | --- | --- |
 | `wav2vec2_2s_fp16w.tflite` | `360.20 MB` | **`180.40 MB`** | `cos_sim = 0.99999996` (`MAE = 3e-5`) | **`~13 ms` / 2.0 s** (`~145×` RT) | **0** |
 | `fm_step_fp16w.tflite` | `148.20 MB` | **`74.27 MB`** | `cos_sim = 0.99985790` | **`~19 ms` / 2.0 s** (`~103×` RT) | **0** |
-| **`student_renderer_256_fp16w.tflite`** *(Default)* | `13.48 MB` | **`6.74 MB`** (`21×` smaller) | **`36.64 dB`** unseen (`73.29 dB` C++ parity) | **`5.4–6.2 ms` (`161–186 FPS` · `0.98 GB` VRAM)** | **0** |
+| **`student_renderer_512_fp16w.tflite`** *(Default HD v2)* | `23.28 MB` | **`11.39 MB`** (`12.6×` smaller) | **`38.19 dB`** unseen 512px (`75.58 dB` C++ parity) | **`11.4–13.5 ms` (`74–88 FPS` · `0.97–1.02 GB` VRAM)** | **0** |
+| `student_renderer_256_fp16w.tflite` *(256² v1)* | `13.48 MB` | **`6.74 MB`** (`21.2×` smaller) | **`36.64 dB`** unseen 256px (`73.29 dB` C++ parity) | **`5.4–6.2 ms` (`161–186 FPS` · `0.98 GB` VRAM)** | **0** |
 | `renderer_decode_fp16w.tflite` *(512² HD Teacher)* | `285.66 MB` | **`143.06 MB`** | **`PSNR = 63.61 dB`** (`MAE = 0.066/255`) | **`19.6–22.5 ms` (`44.5–54.6 FPS` · `2.94 GB` VRAM)** | **0** |
-| **Active 3-Model Total** | — | **`261.4 MB`** *(Student)* / `397.7 MB` *(Teacher)* | **Visually crisp / lossless** | **`1.17 s` boot · Zero stage swaps** | **0** |
+| **Active 3-Model Total** | — | **`266.1 MB`** *(512² v2)* / `261.4 MB` *(256² v1)* / `397.7 MB` *(Teacher)* | **Indistinguishable HD / lossless** | **Zero stage swaps · `0.00 GB` drift** | **0** |
 
 ### Verified Flat VRAM Across 3 Consecutive Live Turns (`923 / 923` Frames)
 
@@ -80,13 +82,14 @@ Measured live via Windows GPU Process Memory (`Win32_PerfFormattedData_GPUPerfor
 | Chrome 149 Mobile WebGPU (`fp16w`) | `143.1 MB` | `63.6 dB` | `752.1 ms` | `1.33 FPS` | Browser |
 | Native LiteRT `2.3.0` Teacher (`fp16w`) | `143.1 MB` | `63.6 dB` | `357.0 ms` | `2.80 FPS` | `2,136 MB` |
 | Native LiteRT `WGPU-FP16` (`hd_fast`) | `131.6 MB` | `38.2 dB` | `210.6 ms` | `4.75 FPS` | `1,877 MB` |
-| **Distilled FiLM Mobile Student (`256×256`)** | **`6.74 MB` (`21×` smaller!)** | **`36.64 dB` (`MouthMAE 2.75/255`)** | **`23–30 ms`** | **`33–42 FPS` (`25×–32×` Chrome!)** | **`~850 MB`** |
+| Distilled FiLM Student v1 (`256×256`) | `6.74 MB` (`21×` smaller) | `36.64 dB` (`MouthMAE 2.75/255`) | `23–30 ms` | **`33–42 FPS`** (`25×–32×` Chrome) | `~850 MB` |
+| **Distilled Native `512×512` HD Student v2** *(Default)* | **`11.39 MB` (`12.6×` smaller!)** | **`38.19 dB` (`MouthMAE 2.44/255`, VGG+GAN)** | **`38.3 ms`** | **`26.1 FPS` (real-time native 512² HD!)** | **`~880 MB`** |
 
-- **Cold boot (all 3 models resident + Nano warmed):** **`~2.1–4.4 s`** (student compiles in `61–153 ms` on `WGPU-FP16`)
-- **On-device LLM:** **AICore Gemini Nano** (`genai-prompt:1.0.0-beta5`, parallel `warmup()`, `enableThinking=false`, live streaming, pipelined `0.2 s` turn lookahead in 3-Turn Demo) — **`~550–860 ms` / reply**, 100% offline
-- **On-device Voice & Sync:** Offline Android Neural `TextToSpeech.synthesizeToFile()` + hardware `MediaPlayer.currentPosition` audio-locked lip-sync (**25 FPS realtime**, `0 s` buffering)
+- **Cold boot (all 3 models resident + Nano warmed):** **`~3.14 s`** (`student_renderer_512_fp16w.tflite` compiles in `696 ms` on `WGPU-FP16`)
+- **On-device LLM:** **AICore Gemini Nano** (`genai-prompt:1.0.0-beta5`, parallel `warmup()`, `enableThinking=false`, live streaming, pipelined `0.22 s` turn lookahead in 3-Turn Demo) — **`~550–860 ms` / reply**, 100% offline
+- **On-device Voice & Sync:** Offline Android SEANet Neural TTS (Mutex-serialized `tpd` / `iog` defaults) + native **`AudioTrack` + hardware `AudioTimestamp` DAC clock** with render-ahead VSYNC pacing (**`~8–9 ms` mean sync error**, zero drift across 16–26s utterances!)
 
-![Teacher (143 MB) vs. Distilled Mobile Student (6.74 MB) on Unseen Speech](docs/val_teacher_vs_student.png)
+![Teacher (143 MB) vs. Distilled Native 512x512 HD Student v2 (11.39 MB) on Unseen Speech (Full + 2x Face Crops)](docs/val_teacher_vs_student512.png)
 
 ---
 
@@ -142,10 +145,11 @@ Chrome_Avatar/
 ### Prerequisites
 - **Windows 10/11** with **Node.js 20+** and a **WebGPU-capable GPU**
 - **Google Chrome** (for built-in **Gemini Nano** Prompt API — default) or any WebGPU browser (automatically supports **WebLLM** `Llama 3.2 1B` / `Gemma 2 2B` / `Qwen 2.5 1.5B`)
-- **Zero manual model builds required:** All pre-exported FP16-weight `.tflite` models (`404.5 MB` total for both Student + Teacher) are hosted on [**Release `v1.0.0`**](https://github.com/jjmlovesgit/Chrome_Avatar/releases/tag/v1.0.0) and **download automatically on first launch** when you run `Start_Studio.bat`!
+- **Zero manual model builds required:** All pre-exported FP16-weight `.tflite` models are hosted on [**Release `v1.0.0`**](https://github.com/jjmlovesgit/Chrome_Avatar/releases/tag/v1.0.0) and **download automatically on first launch** when you run `Start_Studio.bat`!
   - [`wav2vec2_2s_fp16w.tflite`](https://github.com/jjmlovesgit/Chrome_Avatar/releases/download/v1.0.0/wav2vec2_2s_fp16w.tflite) (`180.4 MB`)
   - [`fm_step_fp16w.tflite`](https://github.com/jjmlovesgit/Chrome_Avatar/releases/download/v1.0.0/fm_step_fp16w.tflite) (`74.3 MB`)
-  - [`student_renderer_256_fp16w.tflite`](https://github.com/jjmlovesgit/Chrome_Avatar/releases/download/v1.0.0/student_renderer_256_fp16w.tflite) (`6.74 MB` — **default ultra-fast renderer** on both Desktop Chrome & Pixel 10!)
+  - [`student_renderer_512_fp16w.tflite`](https://github.com/jjmlovesgit/Chrome_Avatar/releases/download/v1.0.0/student_renderer_512_fp16w.tflite) (`11.39 MB` — **default native 512×512 HD Student v2** on both Desktop Chrome & Pixel 10!)
+  - [`student_renderer_256_fp16w.tflite`](https://github.com/jjmlovesgit/Chrome_Avatar/releases/download/v1.0.0/student_renderer_256_fp16w.tflite) (`6.74 MB` — optional ultra-fast 256² Student v1)
   - [`renderer_decode_fp16w.tflite`](https://github.com/jjmlovesgit/Chrome_Avatar/releases/download/v1.0.0/renderer_decode_fp16w.tflite) (`143.1 MB` — optional 512×512 HD Teacher)
 
 ### 1. Clone & One-Click Launch (Recommended — Turnkey, Zero Terminal Window)
@@ -173,10 +177,10 @@ Then double-click **`Start_Studio.bat`** in the `Chrome_Avatar` folder:
 
 Open a **normal (non-Incognito) Google Chrome** window *(use Google Chrome rather than Edge/Firefox for built-in Gemini Nano)*:
 
-- **Default — `256² Mobile Student` (`6.74 MB` · `~161–186 FPS` · `~0.98 GB` WebGPU VRAM):** http://127.0.0.1:8765/
-- **Student FP16 (`~186 FPS` · `5.4 ms/frame`):** http://127.0.0.1:8765/?precision=fp16&renderer=student
+- **Default — `512² HD Student v2` (`11.39 MB` · `74–88 FPS` · `0.97–1.02 GB` WebGPU VRAM):** http://127.0.0.1:8765/
+- **HD Student v2 FP16 (`88.0 FPS` · `11.4 ms/frame` · `0.97 GB` VRAM):** http://127.0.0.1:8765/?precision=fp16&renderer=student512
+- **256² Mobile Student v1 (`6.74 MB` · `161–186 FPS` · `0.98 GB` VRAM):** http://127.0.0.1:8765/?renderer=student
 - **512² HD Teacher (`143 MB` · `63.6 dB` · `~44.5 FPS`):** http://127.0.0.1:8765/?renderer=teacher
-- **512² HD Teacher FP16 (`~54.5 FPS` · `42.7 dB`):** http://127.0.0.1:8765/?precision=fp16&renderer=teacher
 
 > **Enabling Chrome Built-in Gemini Nano (Default):**
 > 1. Make sure you are in **Google Chrome** on `http://127.0.0.1:8765/` (or `http://localhost:8765/`), not Incognito.

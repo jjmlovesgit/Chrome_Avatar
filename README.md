@@ -1,8 +1,10 @@
 # Chrome Avatar (+ Pixel 10 Native) — 100% Local 512×512 AI Avatar Studio (LiteRT + Gemini Nano)
 
-Real-time **512×512 conversational talking-head avatars** (**Puck** & **Gretchen**) powered by **one single C++ LiteRT Tensor API pipeline** running **100% locally** in two form factors:
-1. **Desktop Chrome WebGPU Studio (`web/`):** **Chrome Built-in Gemini Nano** (or in-browser **WebLLM**) + warm Windows SAPI neural voices (`0 GB` VRAM) + **LiteRT.js (`@litertjs/core`) WebGPU** — **`44.5–54.6 FPS`** live with **`0.00 GB` VRAM drift**.
-2. **Native Android / Google Pixel 10 Studio (`pixel_avatar/`):** **100% offline** Kotlin + Jetpack Compose app using **LiteRT `2.3.0` (`WGPU-FP16`)** + **Pixel 10 AICore Gemini Nano** (`genai-prompt` with parallel warmup, streaming, and pipelined `0.2 s` turn handoffs) + **offline Android Neural TTS** + our **distilled `6.74 MB` FiLM Mobile U-Net Student (`21×` smaller than teacher!)** — **`33–42 FPS` (`23–30 ms/frame`)** real-time talking heads (`25×–32×` faster than mobile Chrome WebGPU!), **`~850 MB` App RAM**, **`0 s` turn buffering**, hardware-clock audio-locked lip-sync.
+Real-time **conversational talking-head avatars** (**Puck** & **Gretchen**) powered by **one single C++ LiteRT Tensor API pipeline** running **100% locally** in two form factors:
+1. **Desktop Chrome WebGPU Studio (`web/`):** **Chrome Built-in Gemini Nano** (or in-browser **WebLLM**) + warm Windows SAPI Natural HD voices (`0 GB` VRAM) + **LiteRT.js (`@litertjs/core`) WebGPU** with a live **`Renderer` switcher**:
+   - **Default — `256² Mobile Student (6.74 MB)`:** **`161–186 FPS`** (`5.4–6.2 ms/frame`), **`~0.98 GB` WebGPU VRAM** (`3.1×` less VRAM & `3.6×–4.1×` faster than Teacher), **`1.17 s` boot** (`33–36 ms` renderer compile)!
+   - **Optional — `512² HD Teacher (143.1 MB)`:** **`44.5–54.6 FPS`** (`19.6–22.5 ms/frame`, `63.6 dB` parity) with **`0.00 GB` VRAM drift**.
+2. **Native Android / Google Pixel 10 Studio (`pixel_avatar/`):** **100% offline** Kotlin + Jetpack Compose app using **LiteRT `2.3.0` (`WGPU-FP16`)** + **Pixel 10 AICore Gemini Nano** (`genai-prompt` with parallel warmup, streaming, and pipelined `0.2 s` turn handoffs) + **offline Android Neural TTS** + the exact same **distilled `6.74 MB` FiLM Mobile U-Net Student (`21×` smaller than teacher!)** — **`33–42 FPS` (`23–30 ms/frame`)** real-time talking heads (`25×–32×` faster than mobile Chrome WebGPU!), **`~850 MB` App RAM**, **`0 s` turn buffering**, hardware-clock audio-locked lip-sync.
 
 No Python inference server. No PyTorch runtime. No cloud LLM APIs. Built natively on Windows (VS 2022 MSVC + CMake, zero WSL).
 
@@ -16,13 +18,13 @@ No Python inference server. No PyTorch runtime. No cloud LLM APIs. Built nativel
 
 ## Highlights
 
-- **44+ FPS live 512×512 WebGPU avatar rendering** (`22.4 ms/frame` FP32 · `19.6 ms/frame` FP16 on NVIDIA RTX 5090 — **1.8× faster than 25 fps realtime**), **0 unsupported WebGPU ops** across all 3 models.
-- **Zero-leak, rock-solid flat VRAM (`0.00 GB` drift across turns):** All 3 FP16-weight `.tflite` models (`397.7 MB` total) compile **once at boot** and stay permanently resident on WebGPU — verified **`4.16 GB → 4.16 GB → 4.16 GB`** across consecutive live turns (`923 / 923` frames, `0` drops).
-- **4×–5.4× less VRAM than desktop PyTorch + LM Studio:** **`3.00–4.00 GB` net VRAM** with in-browser WebLLM (`Llama 3.2 1B`), or **`~7.90 GB` net VRAM** with real **Google Chrome Built-in Gemini Nano v3** (`OnDeviceModelService`), vs. **`16.28 GB`** for the desktop Python + LM Studio stack.
-- **Direct C++ LiteRT Tensor API authoring (zero Python converters):** All 3 `.tflite` graphs (`wav2vec2_2s`, `fm_step`, `renderer_decode`) are authored directly in C++ from `.safetensors` checkpoints via `litert::tensor::ModelFactory::Save` with `--fp16-weights` (`Type::kFP16` + `Dequantize`) and bit-exact parity verification against PyTorch.
-- **Multi-avatar conversational studio:**
-  - Instant **Puck ↔ Gretchen** switching (click buttons or say `"Hey Puck..."` / `"Hey Gretchen..."`) with per-avatar portraits, GPU face caches (`9.17 MB` each), SAPI voices (`Andrew (Natural HD)` / `Jenny(Natural)`), and persona prompts sharing one room conversation history.
-  - **🎭 3-Turn Demo Chat:** One-click live 3-turn back-and-forth conversation between Puck and Gretchen on preset or custom topics (default: *"What you did last weekend"*).
+- **161–186 FPS default Student / 44–55 FPS HD Teacher in Chrome WebGPU:** Live **`Renderer`** dropdown switches seamlessly between our distilled **`6.74 MB` `256² Mobile Student`** (**`161–166 FPS`** FP32 / **`186 FPS`** FP16, **`0.98 GB`** WebGPU VRAM, `1.17 s` boot) and the full **`143.1 MB` `512² HD Teacher`** (**`44.5 FPS`** FP32 / **`54.6 FPS`** FP16, `63.6 dB` parity) — **0 unsupported WebGPU ops** across all models.
+- **Zero-leak, rock-solid flat VRAM (`0.00 GB` drift across turns):** All 3 resident FP16-weight `.tflite` models (`261.4 MB` Student / `397.7 MB` Teacher) compile **once at boot** and stay permanently resident on WebGPU — verified **`0.97–0.98 GB`** (Student) and **`4.16 GB → 4.16 GB → 4.16 GB`** (Teacher + WebLLM) across consecutive live turns with `0` dropped frames.
+- **Up to 8×+ less VRAM than desktop PyTorch + LM Studio:** **`~0.98 GB` WebGPU VRAM** for the Student avatar stack (`~1.9 GB` with WebLLM `Llama 3.2 1B`), **`3.00–4.00 GB`** with Teacher + WebLLM, or **`~7.90 GB`** with Teacher + Chrome Built-in Gemini Nano v3, vs. **`16.28 GB`** for the desktop Python + LM Studio stack.
+- **Direct C++ LiteRT Tensor API authoring (zero Python converters):** All `.tflite` graphs (`wav2vec2_2s`, `fm_step`, `renderer_decode`, and `student_renderer_256`) are authored directly in C++ from `.safetensors` checkpoints via `litert::tensor::ModelFactory::Save` with `--fp16-weights` (`Type::kFP16` + `Dequantize`) and bit-exact parity verification against PyTorch.
+- **Multi-avatar conversational studio (mirrored across Desktop Chrome & Pixel 10):**
+  - Instant **Puck ↔ Gretchen** switching (click buttons or say `"Hey Puck..."` / `"Hey Gretchen..."`) with per-avatar portraits, GPU face caches, voices (warm Windows Natural HD SAPI on Desktop; offline Android SEANet `r85` voices on Pixel 10), and persona prompts sharing one room conversation history.
+  - **🎭 Pipelined 3-Turn Demo Chat + `★ X Demo Script (LiteRT Showcase)`:** Overlaps Turn `i+1` LLM + TTS prefetch while Turn `i` speaks for near-instant turn handoffs, with preset/custom topics plus the built-in 3-turn LiteRT Showcase script.
   - **Live Top-Right Memory HUD:** Real-time GPU VRAM (`Nano`, `WebGPU`, `JS`, and session `Peak`) polled in `~25 ms` via a warm Windows GPU performance counter worker (`GET /api/vram`).
   - **Text + Voice Q&A:** Type or click **🎤 Ask** (`Web SpeechRecognition`) to converse hands-free.
 
@@ -55,12 +57,13 @@ Measured live via Windows GPU Process Memory (`Win32_PerfFormattedData_GPUPerfor
 
 ### Resident FP16-Weight `.tflite` Models (Zero Per-Turn Recompilation)
 
-| Model | FP32 Size | **FP16-Weight Size** | Parity vs. PyTorch FP32 | Steady WebGPU Speed | Unsupported Ops |
+| Model | FP32 Size | **FP16-Weight Size** | Parity vs. PyTorch FP32 | Steady WebGPU Speed (RTX 5090) | Unsupported Ops |
 | --- | --- | --- | --- | --- | --- |
 | `wav2vec2_2s_fp16w.tflite` | `360.20 MB` | **`180.40 MB`** | `cos_sim = 0.99999996` (`MAE = 3e-5`) | **`~13 ms` / 2.0 s** (`~145×` RT) | **0** |
 | `fm_step_fp16w.tflite` | `148.20 MB` | **`74.27 MB`** | `cos_sim = 0.99985790` | **`~19 ms` / 2.0 s** (`~103×` RT) | **0** |
-| `renderer_decode_fp16w.tflite` | `285.66 MB` | **`143.06 MB`** | **`PSNR = 63.61 dB`** (`MAE = 0.066/255`) | **`22.5 ms/frame` (`44.5 FPS`)** | **0** |
-| **Total** | `794.06 MB` | **`397.73 MB`** | **Visually lossless** | **Zero stage swaps** | **0** |
+| **`student_renderer_256_fp16w.tflite`** *(Default)* | `13.48 MB` | **`6.74 MB`** (`21×` smaller) | **`36.64 dB`** unseen (`73.29 dB` C++ parity) | **`5.4–6.2 ms` (`161–186 FPS` · `0.98 GB` VRAM)** | **0** |
+| `renderer_decode_fp16w.tflite` *(512² HD Teacher)* | `285.66 MB` | **`143.06 MB`** | **`PSNR = 63.61 dB`** (`MAE = 0.066/255`) | **`19.6–22.5 ms` (`44.5–54.6 FPS` · `2.94 GB` VRAM)** | **0** |
+| **Active 3-Model Total** | — | **`261.4 MB`** *(Student)* / `397.7 MB` *(Teacher)* | **Visually crisp / lossless** | **`1.17 s` boot · Zero stage swaps** | **0** |
 
 ### Verified Flat VRAM Across 3 Consecutive Live Turns (`923 / 923` Frames)
 
@@ -139,10 +142,11 @@ Chrome_Avatar/
 ### Prerequisites
 - **Windows 10/11** with **Node.js 20+** and a **WebGPU-capable GPU**
 - **Google Chrome** (for built-in **Gemini Nano** Prompt API — default) or any WebGPU browser (automatically supports **WebLLM** `Llama 3.2 1B` / `Gemma 2 2B` / `Qwen 2.5 1.5B`)
-- **Zero manual model builds required:** All 3 pre-exported FP16-weight `.tflite` models (`397.7 MB` total) are hosted on [**Release `v1.0.0`**](https://github.com/jjmlovesgit/Chrome_Avatar/releases/tag/v1.0.0) and **download automatically on first launch** when you run `Start_Studio.bat`!
+- **Zero manual model builds required:** All pre-exported FP16-weight `.tflite` models (`404.5 MB` total for both Student + Teacher) are hosted on [**Release `v1.0.0`**](https://github.com/jjmlovesgit/Chrome_Avatar/releases/tag/v1.0.0) and **download automatically on first launch** when you run `Start_Studio.bat`!
   - [`wav2vec2_2s_fp16w.tflite`](https://github.com/jjmlovesgit/Chrome_Avatar/releases/download/v1.0.0/wav2vec2_2s_fp16w.tflite) (`180.4 MB`)
   - [`fm_step_fp16w.tflite`](https://github.com/jjmlovesgit/Chrome_Avatar/releases/download/v1.0.0/fm_step_fp16w.tflite) (`74.3 MB`)
-  - [`renderer_decode_fp16w.tflite`](https://github.com/jjmlovesgit/Chrome_Avatar/releases/download/v1.0.0/renderer_decode_fp16w.tflite) (`143.1 MB`)
+  - [`student_renderer_256_fp16w.tflite`](https://github.com/jjmlovesgit/Chrome_Avatar/releases/download/v1.0.0/student_renderer_256_fp16w.tflite) (`6.74 MB` — **default ultra-fast renderer** on both Desktop Chrome & Pixel 10!)
+  - [`renderer_decode_fp16w.tflite`](https://github.com/jjmlovesgit/Chrome_Avatar/releases/download/v1.0.0/renderer_decode_fp16w.tflite) (`143.1 MB` — optional 512×512 HD Teacher)
 
 ### 1. Clone & One-Click Launch (Recommended — Turnkey, Zero Terminal Window)
 
@@ -151,7 +155,7 @@ git clone https://github.com/jjmlovesgit/Chrome_Avatar.git
 ```
 
 Then double-click **`Start_Studio.bat`** in the `Chrome_Avatar` folder:
-- **First run only:** Automatically downloads the 3 FP16-weight `.tflite` models (`397.7 MB` total) from GitHub Release `v1.0.0` and runs `npm install` inside `web/`.
+- **First run only:** Automatically downloads the FP16-weight `.tflite` models from GitHub Release `v1.0.0` and runs `npm install` inside `web/`.
 - **Every launch:** Starts `node server.mjs` **completely hidden in the background** (no terminal window left open), waits for `http://127.0.0.1:8765/`, and opens **Google Chrome** directly to the studio.
 - **Clean shutdown:** Double-click **`Stop_Studio.bat`** anytime to stop the hidden background server and its SAPI/VRAM workers.
 
@@ -165,12 +169,14 @@ Then double-click **`Start_Studio.bat`** in the `Chrome_Avatar` folder:
 2. **Raw 16 kHz PCM audio from Windows SAPI voices (`POST /api/tts`):** Browsers can *play* OS voices via `speechSynthesis`, but intentionally block capturing raw PCM audio bytes from it — and `wav2vec2_2s.tflite` needs the raw waveform to drive exact lip-sync (`0 GB` VRAM).
 3. **Live GPU VRAM HUD (`GET /api/vram`):** Browsers hide exact GPU VRAM usage from JavaScript for privacy/fingerprinting reasons, so `vram_worker.ps1` polls Windows' GPU performance counter (~25 ms) for the top-right HUD.
 
-### 3. Open in Google Chrome & Precision Modes
+### 3. Open in Google Chrome, Renderer & Precision Modes
 
 Open a **normal (non-Incognito) Google Chrome** window *(use Google Chrome rather than Edge/Firefox for built-in Gemini Nano)*:
 
-- **FP32 (`63.6 dB` renderer · `~44.5 FPS`):** http://127.0.0.1:8765/
-- **FP16 (`-1.0 GB` VRAM · `~54.5 FPS` · `42.7 dB` visually lossless):** http://127.0.0.1:8765/web/demo.html?precision=fp16
+- **Default — `256² Mobile Student` (`6.74 MB` · `~161–186 FPS` · `~0.98 GB` WebGPU VRAM):** http://127.0.0.1:8765/
+- **Student FP16 (`~186 FPS` · `5.4 ms/frame`):** http://127.0.0.1:8765/?precision=fp16&renderer=student
+- **512² HD Teacher (`143 MB` · `63.6 dB` · `~44.5 FPS`):** http://127.0.0.1:8765/?renderer=teacher
+- **512² HD Teacher FP16 (`~54.5 FPS` · `42.7 dB`):** http://127.0.0.1:8765/?precision=fp16&renderer=teacher
 
 > **Enabling Chrome Built-in Gemini Nano (Default):**
 > 1. Make sure you are in **Google Chrome** on `http://127.0.0.1:8765/` (or `http://localhost:8765/`), not Incognito.
@@ -182,8 +188,8 @@ Open a **normal (non-Incognito) Google Chrome** window *(use Google Chrome rathe
 
 - **Text or Voice Q&A:** Type in the chat box (press **Enter**) or click **🎤 Ask** to speak into your mic.
 - **Swap Avatars with Shared Memory:** Click **Puck** / **Gretchen** (or address them by name, e.g. *"Hey Gretchen, do you agree with Puck?"*) to swap the 512×512 avatar, Windows SAPI voice (`Andrew HD` ↔ `Jenny`), and personality prompt while sharing the same room conversation history.
-- **🎭 3-Turn Demo Chat:** Pick a topic from **Demo Topic** (default: *"What you did last weekend"*, or type a custom topic first) and click **🎭 3-Turn Demo Chat** to watch Puck and Gretchen have a live 3-turn back-and-forth conversation — then jump right in afterward. Click the red **■** button anytime to stop.
-- **Live Precision & Memory HUD:** Switch **Precision (`FP32` / `FP16`)** or **In-Browser LLM** directly in the UI — old WebGPU devices/engines are explicitly torn down and the top-right **Memory HUD** (`VRAM`, `Peak`, `Nano`, `WebGPU`, `JS`) recalculates automatically. Click the HUD anytime to force-refresh and reset `Peak` *(keep only one studio tab open for single-tab VRAM readings)*.
+- **🎭 Pipelined 3-Turn Demo Chat:** Pick a topic from **Demo Topic** (including **`★ X Demo Script (LiteRT Showcase)`** or *"What you did last weekend"*, or type a custom topic first) and click **🎭 3-Turn Demo Chat** to watch Puck and Gretchen have a pipelined 3-turn back-and-forth conversation (Turn `i+1` LLM + SAPI prefetches while Turn `i` speaks) — then jump right in afterward. Click the red **■** button anytime to stop.
+- **Live Renderer, Precision & Memory HUD:** Switch **Renderer (`256² Mobile Student` / `512² HD Teacher`)**, **Precision (`FP32` / `FP16`)**, or **In-Browser LLM** directly in the UI — old WebGPU devices/engines are explicitly torn down and the top-right **Memory HUD** (`VRAM`, `Peak`, `Nano`, `WebGPU`, `JS`) recalculates automatically. Click the HUD anytime to force-refresh and reset `Peak` *(keep only one studio tab open for single-tab VRAM readings)*.
 
 ---
 

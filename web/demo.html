@@ -176,10 +176,17 @@
             <button id="btnGretchen" disabled>Gretchen</button>
           </div>
           <label style="font-size:12px; color:#8b949e; display:inline-flex; align-items:center; gap:5px;">
+            Renderer:
+            <select id="rendererSelect">
+              <option value="student">256² Mobile Student (6.7 MB · Ultra-Fast)</option>
+              <option value="teacher">512² HD Teacher (143 MB · 63.6 dB)</option>
+            </select>
+          </label>
+          <label style="font-size:12px; color:#8b949e; display:inline-flex; align-items:center; gap:5px;">
             Precision:
             <select id="precisionSelect">
-              <option value="fp32">FP32 (118 dB · ~3.1 GB avatar)</option>
-              <option value="fp16">FP16 (43 dB · ~2.1 GB avatar)</option>
+              <option value="fp32">FP32</option>
+              <option value="fp16">FP16 (-VRAM)</option>
             </select>
           </label>
           <label style="font-size:12px; color:#8b949e; display:inline-flex; align-items:center; gap:5px;">
@@ -225,9 +232,10 @@
           <label style="flex:1; min-width:200px;">
             Demo Topic:
             <select id="demoTopic" style="flex:1;">
-              <option value="what you each did last weekend">What you did last weekend</option>
+              <option value="__x_showcase__">★ X Demo Script (LiteRT Showcase)</option>
+              <option value="what you each did last weekend" selected>What you did last weekend</option>
               <option value="your favorite coffee shops and weekend reading">Coffee &amp; weekend reading</option>
-              <option value="running live 512x512 talking avatars 100% inside a web browser">Running avatars 100% in browser</option>
+              <option value="running live talking avatars 100% inside Chrome and Pixel 10">Running avatars 100% offline</option>
               <option value="planning a spontaneous weekend road trip together">Planning a weekend road trip</option>
             </select>
           </label>
@@ -238,7 +246,7 @@
           <div class="metric"><div class="k">In-Browser LLM</div><div class="v" id="mLlm">—</div></div>
           <div class="metric"><div class="k">SAPI TTS</div><div class="v" id="mTts">—</div></div>
           <div class="metric"><div class="k">Wav2Vec + FM</div><div class="v" id="mMotion">—</div></div>
-          <div class="metric"><div class="k">Renderer 512²</div><div class="v" id="mRend">—</div></div>
+          <div class="metric"><div class="k" id="mRendLabel">Renderer 256²</div><div class="v" id="mRend">—</div></div>
         </div>
 
         <details open>
@@ -284,7 +292,9 @@
     const chatBox = document.getElementById('chatBox');
     const chatInput = document.getElementById('chatInput');
     const llmBackendEl = document.getElementById('llmBackend');
+    const rendererSelectEl = document.getElementById('rendererSelect');
     const precisionSelectEl = document.getElementById('precisionSelect');
+    const mRendLabelEl = document.getElementById('mRendLabel');
     const voiceSelectEl = document.getElementById('voiceSelect');
     const llmPillEl = document.getElementById('llmPill');
     const btnDownloadNano = document.getElementById('btnDownloadNano');
@@ -354,6 +364,10 @@
     const canvas = document.getElementById('avatarCanvas');
     const ctx = canvas.getContext('2d');
     const imgData = ctx.createImageData(512, 512);
+    const tmpCanvas256 = document.createElement('canvas');
+    tmpCanvas256.width = 256; tmpCanvas256.height = 256;
+    const tmpCtx256 = tmpCanvas256.getContext('2d');
+    const imgData256 = tmpCtx256.createImageData(256, 256);
 
     const mLlm = document.getElementById('mLlm');
     const mTts = document.getElementById('mTts');
@@ -443,6 +457,7 @@
     ];
 
     let gpuPrecision = 'fp32';
+    let rendererMode = 'student'; // 'student' (6.74 MB 256x256 ultra-fast) or 'teacher' (143 MB 512x512 HD)
     const getWebGpuOpts = () => ({ accelerator: 'webgpu', gpuOptions: { precision: gpuPrecision } });
 
     let w2vBytes = null, fmBytes = null, rendBytes = null;
@@ -683,12 +698,14 @@
             const stream = await session.promptStreaming(contextStr);
             for await (const chunk of stream) {
               reply = (reply && chunk.startsWith(reply)) ? chunk : (reply + chunk);
-              bubbleEl.textContent = reply;
-              chatBox.scrollTop = chatBox.scrollHeight;
+              if (bubbleEl) {
+                bubbleEl.textContent = reply;
+                chatBox.scrollTop = chatBox.scrollHeight;
+              }
             }
           } else {
             reply = await session.prompt(contextStr);
-            bubbleEl.textContent = reply;
+            if (bubbleEl) bubbleEl.textContent = reply;
           }
         } finally {
           if (cloned && typeof session.destroy === 'function') {
@@ -700,7 +717,7 @@
           llmBackendEl.value = 'webllm:Llama-3.2-1B-Instruct-q4f16_1-MLC';
           backend = llmBackendEl.value;
           reply = '';
-          bubbleEl.textContent = 'Loading in-browser WebLLM…';
+          if (bubbleEl) bubbleEl.textContent = 'Loading in-browser WebLLM…';
         }
       }
 
@@ -721,8 +738,10 @@
           const delta = chunk.choices?.[0]?.delta?.content || '';
           if (delta) {
             reply += delta;
-            bubbleEl.textContent = reply;
-            chatBox.scrollTop = chatBox.scrollHeight;
+            if (bubbleEl) {
+              bubbleEl.textContent = reply;
+              chatBox.scrollTop = chatBox.scrollHeight;
+            }
           }
         }
       } else if (backend === 'local') {
@@ -735,7 +754,7 @@
         const data = await resp.json();
         if (!resp.ok) throw new Error(data.error || `HTTP ${resp.status}`);
         reply = data?.choices?.[0]?.message?.content || '';
-        bubbleEl.textContent = reply;
+        if (bubbleEl) bubbleEl.textContent = reply;
       }
 
       reply = reply.replace(/[*_`#]/g, '').trim();
@@ -767,15 +786,17 @@
         const lastEnd = Math.max(reply.lastIndexOf('.'), reply.lastIndexOf('!'), reply.lastIndexOf('?'));
         if (lastEnd >= 25) reply = reply.slice(0, lastEnd + 1).trim();
       }
-      bubbleEl.textContent = reply;
+      if (bubbleEl) bubbleEl.textContent = reply;
       const ms = performance.now() - t0;
-      mLlm.textContent = `${ms.toFixed(0)} ms (${tag})`;
+      if (bubbleEl) mLlm.textContent = `${ms.toFixed(0)} ms (${tag})`;
       return { reply, ms, tag };
     }
 
-    async function synthesizeSapi(text, avatarKey) {
+    async function synthesizeSapi(text, avatarKey, forcePersonaVoice = false) {
       const t0 = performance.now();
-      const voice = voiceSelectEl.value || PERSONAS[avatarKey].voice;
+      const voice = (forcePersonaVoice || avatarKey !== activeAvatarName)
+        ? PERSONAS[avatarKey].voice
+        : (voiceSelectEl.value || PERSONAS[avatarKey].voice);
       const resp = await fetch('/api/tts', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -784,7 +805,7 @@
       if (!resp.ok) throw new Error(`SAPI TTS failed: ${await resp.text()}`);
       const wavBuf = await resp.arrayBuffer();
       const sapiMs = resp.headers.get('X-TTS-Ms') || (performance.now() - t0).toFixed(0);
-      mTts.textContent = `${sapiMs} ms`;
+      if (!forcePersonaVoice) mTts.textContent = `${sapiMs} ms`;
       return { wavBuf, ms: Number(sapiMs) };
     }
 
@@ -807,7 +828,8 @@
       const t3 = performance.now();
       rendModel = await loadAndCompile(rendBytes, getWebGpuOpts());
       rendBytes = null;
-      log(`  [resident] renderer_decode (${gpuPrecision.toUpperCase()}) compiled (${(performance.now() - t3).toFixed(0)} ms)`);
+      const rendName = rendererMode === 'student' ? 'student_renderer_256' : 'renderer_decode';
+      log(`  [resident] ${rendName} (${gpuPrecision.toUpperCase()}) compiled (${(performance.now() - t3).toFixed(0)} ms)`);
     }
 
     async function loadStageAudio() { /* All 3 models stay resident — zero recompile! */ }
@@ -858,6 +880,7 @@
           }
           av.gpuTensors = {};
         }
+        try { av?.srcImgGpu?.delete?.(); av.srcImgGpu = null; } catch {}
       }
       try {
         const dev = getWebGpuDevice();
@@ -870,7 +893,7 @@
     window.addEventListener('pagehide', () => { releaseAllGpuResources(true); });
     window.addEventListener('beforeunload', () => { releaseAllGpuResources(true); });
 
-    precisionSelectEl.onchange = async () => {
+    async function reloadWithParams() {
       badgeEl.textContent = 'Releasing GPU VRAM…';
       memVramValEl.textContent = 'Resetting…';
       memPeakValEl.textContent = '';
@@ -878,10 +901,13 @@
       await new Promise(r => setTimeout(r, 250));
       const u = new URL(location.href);
       u.searchParams.set('precision', precisionSelectEl.value);
+      u.searchParams.set('renderer', rendererSelectEl.value);
       if (llmBackendEl.value !== 'nano') u.searchParams.set('llm', llmBackendEl.value);
       else u.searchParams.delete('llm');
       location.href = u.toString();
-    };
+    }
+    precisionSelectEl.onchange = reloadWithParams;
+    rendererSelectEl.onchange = reloadWithParams;
 
     llmBackendEl.onchange = async () => {
       const val = llmBackendEl.value;
@@ -923,6 +949,22 @@
     };
 
     function drawRgbFloat(rgb) {
+      if (rgb.length === 256 * 256 * 3) {
+        const dst = imgData256.data;
+        const n = 256 * 256;
+        for (let i = 0; i < n; i++) {
+          const b = i * 3, d = i * 4;
+          dst[d + 0] = Math.max(0, Math.min(255, Math.round(rgb[b + 0] * 255)));
+          dst[d + 1] = Math.max(0, Math.min(255, Math.round(rgb[b + 1] * 255)));
+          dst[d + 2] = Math.max(0, Math.min(255, Math.round(rgb[b + 2] * 255)));
+          dst[d + 3] = 255;
+        }
+        tmpCtx256.putImageData(imgData256, 0, 0);
+        ctx.imageSmoothingEnabled = true;
+        ctx.imageSmoothingQuality = 'high';
+        ctx.drawImage(tmpCanvas256, 0, 0, 512, 512);
+        return;
+      }
       const dst = imgData.data;
       const n = 512 * 512;
       for (let i = 0; i < n; i++) {
@@ -937,18 +979,35 @@
     async function loadAvatarCache(name) {
       const base = `/avatars/${name}`;
       const t_r = await fetchF32(`${base}/t_r.bin`);
-      const gpuTensors = {};
-      await Promise.all(AVATAR_SPECS.map(async ([key, shape]) => {
-        const arr = await fetchF32(`${base}/${key}.bin`);
-        const cpuT = new Tensor(arr, shape);
-        const gpuT = await cpuT.moveTo('webgpu');
-        cpuT.delete();
-        gpuTensors[key] = gpuT;
-      }));
       const img = new Image();
       img.src = `${base}/portrait.png`;
       await img.decode();
-      return { name, t_r, gpuTensors, portraitImg: img };
+
+      // Build lightweight [1, 256, 256, 3] NHWC WebGPU tensor for the 6.74 MB mobile student
+      let srcImgGpu = null;
+      const gpuTensors = {};
+      if (rendererMode === 'student') {
+        tmpCtx256.drawImage(img, 0, 0, 256, 256);
+        const px = tmpCtx256.getImageData(0, 0, 256, 256).data;
+        const rgb = new Float32Array(256 * 256 * 3);
+        for (let i = 0; i < 256 * 256; i++) {
+          rgb[i * 3 + 0] = px[i * 4 + 0] / 255.0;
+          rgb[i * 3 + 1] = px[i * 4 + 1] / 255.0;
+          rgb[i * 3 + 2] = px[i * 4 + 2] / 255.0;
+        }
+        const cpuSrc = new Tensor(rgb, [1, 256, 256, 3]);
+        srcImgGpu = await cpuSrc.moveTo('webgpu');
+        cpuSrc.delete();
+      } else {
+        await Promise.all(AVATAR_SPECS.map(async ([key, shape]) => {
+          const arr = await fetchF32(`${base}/${key}.bin`);
+          const cpuT = new Tensor(arr, shape);
+          const gpuT = await cpuT.moveTo('webgpu');
+          cpuT.delete();
+          gpuTensors[key] = gpuT;
+        }));
+      }
+      return { name, t_r, gpuTensors, srcImgGpu, portraitImg: img };
     }
 
     function selectAvatar(name) {
@@ -1106,7 +1165,10 @@
     async function renderOneFrame(avatar, token32) {
       const t0 = performance.now();
       const tcT = new Tensor(token32, [1, 32]);
-      const outs = await rendModel.run({ t_c: tcT, ...avatar.gpuTensors });
+      const inputs = (rendererMode === 'student')
+        ? { t_c: tcT, src_img: avatar.srcImgGpu }
+        : { t_c: tcT, ...avatar.gpuTensors };
+      const outs = await rendModel.run(inputs);
       const hostOut = outs.frame.accelerator === 'webgpu' ? await outs.frame.moveTo('wasm') : outs.frame;
       const rgb = new Float32Array(hostOut.toTypedArray());
       if (hostOut !== outs.frame) hostOut.delete();
@@ -1258,20 +1320,34 @@
 
       const customTopic = chatInput.value.trim();
       if (customTopic) chatInput.value = '';
+      const isShowcase = !customTopic && demoTopicEl.value === '__x_showcase__';
       const topic = customTopic || demoTopicEl.value;
       const topicLabel = customTopic || demoTopicEl.options[demoTopicEl.selectedIndex]?.text || topic;
 
       addChatBubble('sys', null, `🎭 3-Turn Demo (Puck ↔ Gretchen): ${topicLabel}`);
       log(`🎭 Starting 3-turn demo conversation on: "${topicLabel}"`);
 
-      const turns = [
+      const turns = isShowcase ? [
         {
           avatar: 'puck',
-          cue: `Start a fun, casual conversation with Gretchen about ${topic}. Share one specific highlight from your own weekend and ask Gretchen what she did.`,
+          script: "Hey everyone on X! I'm Puck, and right now you're watching me run one hundred percent locally inside Chrome WebGPU — zero cloud servers, zero Python. Gretchen, tell them how we built this whole LiteRT pipeline!",
         },
         {
           avatar: 'gretchen',
-          cue: `Respond naturally to what Puck just said about ${topic}, share a vivid detail from your own weekend, and ask Puck a quick follow-up question.`,
+          script: "Thanks, Puck! Every model in our stack was authored directly from safetensors in C++ using Google's LiteRT Tensor API, with zero unsupported GPU ops. We even distilled a 143-megabyte StyleGAN and Swin teacher into a 6.7-megabyte student that runs at 38 to 42 frames per second offline on a Pixel 10 — and even faster right here in Chrome!",
+        },
+        {
+          avatar: 'puck',
+          script: "With Gemini Nano built right in on both Chrome and Pixel 10! Check out the open-source Chrome Avatar repo on GitHub to run both yourself — and shout out to the LiteRT team!",
+        },
+      ] : [
+        {
+          avatar: 'puck',
+          cue: `Start a fun, casual conversation with Gretchen about ${topic}. Share one specific highlight and ask Gretchen what she thinks.`,
+        },
+        {
+          avatar: 'gretchen',
+          cue: `Respond naturally to what Puck just said about ${topic}, share a vivid detail of your own, and ask Puck a quick follow-up question.`,
         },
         {
           avatar: 'puck',
@@ -1279,28 +1355,65 @@
         },
       ];
 
+      // Pipelined lookahead: while Turn i is speaking, Turn i+1 runs LLM + SAPI TTS in parallel!
+      let prefetched = null;
       let replyBubble = null;
       try {
         for (let i = 0; i < turns.length; i++) {
           if (myDialogue !== dialogueToken) break;
-          const { avatar: speakerKey, cue } = turns[i];
+          const { avatar: speakerKey, cue, script } = turns[i];
           const persona = PERSONAS[speakerKey];
           selectAvatar(speakerKey);
 
-          replyBubble = addChatBubble(speakerKey, `${persona.name} (Turn ${i + 1}/3)`, 'Thinking…');
-          badgeEl.textContent = `Turn ${i + 1}/3 · Thinking (${persona.name})…`;
-          refreshMemoryHud(true);
+          replyBubble = addChatBubble(speakerKey, `${persona.name} (Turn ${i + 1}/3)`, isShowcase ? script : 'Thinking…');
 
-          const { reply, ms: llmMs, tag } = await askLlm(speakerKey, cue, replyBubble);
-          if (myDialogue !== dialogueToken) break;
+          let reply, llmMs, tag, wavBuf, ttsMs;
+          if (prefetched) {
+            badgeEl.textContent = `Turn ${i + 1}/3 · Ready (${persona.name})…`;
+            const res = await prefetched;
+            prefetched = null;
+            if (myDialogue !== dialogueToken) break;
+            ({ reply, llmMs, tag, wavBuf, ttsMs } = res);
+            replyBubble.textContent = reply;
+            mLlm.textContent = isShowcase ? 'Script' : `${llmMs.toFixed(0)} ms`;
+            mTts.textContent = `${ttsMs} ms`;
+          } else {
+            if (isShowcase) {
+              reply = script; llmMs = 0; tag = 'Script';
+              mLlm.textContent = 'Script';
+            } else {
+              badgeEl.textContent = `Turn ${i + 1}/3 · Thinking (${persona.name})…`;
+              refreshMemoryHud(true);
+              const llmRes = await askLlm(speakerKey, cue, replyBubble);
+              if (myDialogue !== dialogueToken) break;
+              reply = llmRes.reply; llmMs = llmRes.ms; tag = llmRes.tag;
+            }
+            badgeEl.textContent = `Turn ${i + 1}/3 · SAPI (${persona.name})…`;
+            const ttsRes = await synthesizeSapi(reply, speakerKey);
+            if (myDialogue !== dialogueToken) break;
+            wavBuf = ttsRes.wavBuf; ttsMs = ttsRes.ms;
+          }
+
           log(`💬 [Turn ${i + 1}/3 · ${persona.name} via ${tag}] (${llmMs.toFixed(0)}ms): ${reply}`);
+          log(`🔊 SAPI (${PERSONAS[speakerKey].voice}): ${ttsMs} ms (${(wavBuf.byteLength / 1024).toFixed(1)} KB WAV)`);
           roomHistory.push({ role: 'assistant', speaker: persona.name, text: reply });
-          refreshMemoryHud(true);
 
-          badgeEl.textContent = `Turn ${i + 1}/3 · SAPI (${persona.name})…`;
-          const { wavBuf, ms: ttsMs } = await synthesizeSapi(reply, speakerKey);
-          if (myDialogue !== dialogueToken) break;
-          log(`🔊 SAPI (${voiceSelectEl.value}): ${ttsMs} ms (${(wavBuf.byteLength / 1024).toFixed(1)} KB WAV)`);
+          // Kick off next turn's LLM + SAPI TTS right now while this turn speaks!
+          if (i + 1 < turns.length) {
+            const nextTurn = turns[i + 1];
+            prefetched = (async () => {
+              let nr, nms, ntag;
+              if (isShowcase) {
+                nr = nextTurn.script; nms = 0; ntag = 'Script';
+              } else {
+                const r = await askLlm(nextTurn.avatar, nextTurn.cue, null);
+                nr = r.reply; nms = r.ms; ntag = r.tag;
+              }
+              const t = await synthesizeSapi(nr, nextTurn.avatar, true);
+              return { reply: nr, llmMs: nms, tag: ntag, wavBuf: t.wavBuf, ttsMs: t.ms };
+            })();
+            prefetched.catch(() => {});
+          }
 
           await speakAudioBuffer(wavBuf, `Turn ${i + 1}/3 (${persona.name})`, playAudio);
           await refreshMemoryHud(true);
@@ -1308,7 +1421,7 @@
 
           if (myDialogue !== dialogueToken) break;
           if (i < turns.length - 1) {
-            await new Promise(r => setTimeout(r, 350));
+            await new Promise(r => setTimeout(r, 120));
           }
         }
         if (myDialogue === dialogueToken) {
@@ -1411,12 +1524,17 @@
           return;
         }
         const params = new URLSearchParams(location.search);
-        if (params.get('precision') === 'fp16') {
+        if (params.get('precision') === 'fp16' || params.get('autotest') === 'pixel') {
           gpuPrecision = 'fp16';
           precisionSelectEl.value = 'fp16';
         }
+        rendererMode = (params.get('renderer') === 'teacher') ? 'teacher' : 'student';
+        rendererSelectEl.value = rendererMode;
+        mRendLabelEl.textContent = rendererMode === 'student' ? 'Student 256²' : 'Teacher 512²';
         if (params.get('llm')) {
           llmBackendEl.value = params.get('llm');
+        } else if (params.get('autotest') === 'pixel') {
+          llmBackendEl.value = 'local';
         }
 
         await detectGeminiNano();
@@ -1430,20 +1548,44 @@
 
         if (!isWebGPUSupported()) throw new Error('WebGPU is not supported in this browser.');
         const adapter = await navigator.gpu.requestAdapter();
-        log(`WebGPU: ${adapter?.info?.vendor || ''} ${adapter?.info?.architecture || ''}`);
+        log(`WebGPU: ${adapter?.info?.vendor || ''} ${adapter?.info?.architecture || ''} ${adapter?.info?.device || ''} (maxBuf=${((adapter?.limits?.maxBufferSize || 0) / 1048576).toFixed(0)}MB, maxStorage=${((adapter?.limits?.maxStorageBufferBindingSize || 0) / 1048576).toFixed(0)}MB, f16=${adapter?.features?.has('shader-f16')})`);
+        if (params.get('autotest') === 'pixel') {
+          fetch('/api/telemetry', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              phase: 'pixel_boot',
+              ua: navigator.userAgent,
+              nanoStatus,
+              precision: gpuPrecision,
+              adapterInfo: {
+                vendor: adapter?.info?.vendor,
+                architecture: adapter?.info?.architecture,
+                device: adapter?.info?.device,
+                description: adapter?.info?.description,
+              },
+              limits: {
+                maxBufferSizeMB: Math.round((adapter?.limits?.maxBufferSize || 0) / 1048576),
+                maxStorageBufferBindingSizeMB: Math.round((adapter?.limits?.maxStorageBufferBindingSize || 0) / 1048576),
+                shaderF16: !!adapter?.features?.has('shader-f16'),
+              },
+            }),
+          }).catch(() => {});
+        }
 
         const t0 = performance.now();
         await loadLiteRt('/web/node_modules/@litertjs/core/wasm/', { jspi: true });
 
-        badgeEl.textContent = 'Loading 3 FP16-weight .tflite models…';
+        const rendUrl = rendererMode === 'student' ? '/student_renderer_256_fp16w.tflite' : '/renderer_decode_fp16w.tflite';
+        badgeEl.textContent = `Loading 3 .tflite models (${rendererMode})…`;
         [w2vBytes, fmBytes, rendBytes, blinkDelta] = await Promise.all([
           fetchBytes('/wav2vec2_2s_fp16w.tflite'),
           fetchBytes('/fm_step_fp16w.tflite'),
-          fetchBytes('/renderer_decode_fp16w.tflite'),
+          fetchBytes(rendUrl),
           fetchF32('/avatars/blink_delta.bin'),
         ]);
         const totMb = (w2vBytes.byteLength + fmBytes.byteLength + rendBytes.byteLength) / 1048576;
-        log(`✓ Loaded 3 FP16-weight .tflite models (${totMb.toFixed(1)} MB)`);
+        log(`✓ Loaded 3 FP16-weight .tflite models (${totMb.toFixed(1)} MB · renderer=${rendererMode})`);
 
         badgeEl.textContent = 'Loading avatars…';
         avatars.puck = await loadAvatarCache('puck');
@@ -1479,7 +1621,34 @@
 
         [btnPuck, btnGretchen, btnSend, btnVoiceAsk, btnDemoChat, btnPlayPuck, btnPlayGretchen, chatInput].forEach(el => el.disabled = false);
 
-        if (params.get('autotest') === 'dialogue') {
+        if (params.get('autotest') === 'pixel') {
+          const w2vRes = await runWav2VecChunk(new Float32Array(32000), buildCalmPose(0));
+          const fmRes = await runFmChunk(w2vRes.a_now, w2vRes.pose_emb, avatars.puck.t_r, {
+            prev_x: new Float32Array(10 * 32), prev_a: new Float32Array(10 * 32), prev_pose: new Float32Array(10 * 32),
+          }, 2.6, 0.45, 6, 0);
+          let sumR = 0;
+          const N_BENCH = 8;
+          for (let f = 0; f < N_BENCH; f++) {
+            sumR += await renderOneFrame(avatars.puck, fmRes.tokens.subarray(f * 32, (f + 1) * 32));
+          }
+          const avgR = sumR / N_BENCH;
+          const fps = 1000 / avgR;
+          log(`📱 PIXEL BENCH (${gpuPrecision.toUpperCase()}): w2v=${w2vRes.ms.toFixed(1)}ms | fm=${fmRes.ms.toFixed(1)}ms | rend=${avgR.toFixed(1)}ms (${fps.toFixed(2)} FPS)`);
+          badgeEl.textContent = `Pixel · ${fps.toFixed(1)} FPS`;
+          await fetch('/api/telemetry', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              phase: 'pixel_done',
+              precision: gpuPrecision,
+              w2vMs: Number(w2vRes.ms.toFixed(1)),
+              fmMs: Number(fmRes.ms.toFixed(1)),
+              rendMs: Number(avgR.toFixed(1)),
+              fps: Number(fps.toFixed(2)),
+              log: logEl.textContent,
+            }),
+          }).catch(() => {});
+        } else if (params.get('autotest') === 'dialogue') {
           await runDemoConversation(false);
           log('=== DIALOGUE E2E VERIFIED ===');
         } else if (params.get('autotest') === 'webllm') {
@@ -1508,12 +1677,13 @@
       } catch (err) {
         log(`ERROR: ${err?.stack || err}`);
         badgeEl.textContent = 'Error';
-        if (new URLSearchParams(location.search).get('autotest') === 'nano') {
+        const at = new URLSearchParams(location.search).get('autotest');
+        if (at === 'nano' || at === 'pixel') {
           try {
             await fetch('/api/telemetry', {
               method: 'POST',
               headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({ test: 'nano', error: String(err?.stack || err), log: logEl.textContent }),
+              body: JSON.stringify({ test: at, error: String(err?.stack || err), log: logEl.textContent }),
             });
           } catch {}
         }

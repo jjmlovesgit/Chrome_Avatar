@@ -242,6 +242,14 @@ class MainActivity : ComponentActivity() {
         var puckVoiceShort by remember { mutableStateOf("tpd") }
         var gretchenVoiceShort by remember { mutableStateOf("iog") }
         var useStudioUi by remember { mutableStateOf(true) }
+        var studyDeck by remember { mutableStateOf(StudyGuideParser.loadBundledSolarSystem(this@MainActivity)) }
+        var quizActive by remember { mutableStateOf(false) }
+        var quizCardIdx by remember { mutableIntStateOf(0) }
+        var quizMastered by remember { mutableIntStateOf(0) }
+        var quizRetryCount by remember { mutableIntStateOf(0) }
+        var quizAwaitingAnswer by remember { mutableStateOf(false) }
+        var quizCompleted by remember { mutableStateOf(false) }
+        var quizLastQuestion by remember { mutableStateOf("") }
         val defaultDemoTopic = "What you did last weekend"
         val xShowcaseTopic = "★ X Demo Script (LiteRT Showcase)"
         var demoTopic by remember { mutableStateOf(defaultDemoTopic) }
@@ -606,10 +614,167 @@ class MainActivity : ComponentActivity() {
             }
         }
 
+        suspend fun askQuizCardSuspended(idx: Int) {
+            if (idx >= studyDeck.cards.size) {
+                quizCompleted = true
+                quizAwaitingAnswer = false
+                val avatarKey = activeAvatar
+                val name = pipeline.avatars[avatarKey]?.displayName ?: "Puck"
+                val wrap = "Awesome job! You finished all ${studyDeck.cards.size} cards in ${studyDeck.title}, mastering $quizMastered of them!"
+                chatHistory.add(ChatTurn(name, wrap, avatarKey))
+                runCatching { chatListState.animateScrollToItem(chatHistory.lastIndex) }
+                speakReply(avatarKey, wrap)
+                return
+            }
+            quizCardIdx = idx
+            quizRetryCount = 0
+            quizAwaitingAnswer = false
+            val card = studyDeck.cards[idx]
+            val avatarKey = activeAvatar
+            val name = pipeline.avatars[avatarKey]?.displayName ?: "Puck"
+            val bubbleIdx = chatHistory.size
+            chatHistory.add(ChatTurn("$name · Card ${idx + 1}/${studyDeck.cards.size}", "Preparing question…", avatarKey))
+            runCatching { chatListState.animateScrollToItem(chatHistory.lastIndex) }
+
+            statusBadge = "Card ${idx + 1}/${studyDeck.cards.size} (${card.topic})…"
+            val (question, llmMs) = if (nanoLlm.isReady) {
+                withContext(Dispatchers.IO) {
+                    nanoLlm.askStudyQuestion(avatarKey, card, idx, studyDeck.cards.size) { partial ->
+                        uiScope.launch {
+                            if (bubbleIdx < chatHistory.size) {
+                                chatHistory[bubbleIdx] = ChatTurn("$name · ${card.topic}", "$partial▌", avatarKey)
+                            }
+                        }
+                    }
+                }
+            } else {
+                StudyGuideParser.fallbackQuestion(card, idx, studyDeck.cards.size) to 1.0
+            }
+            metricLlm = if (nanoLlm.isReady) "${"%.0f".format(llmMs)} ms" else "Card"
+            quizLastQuestion = question
+            chatHistory[bubbleIdx] = ChatTurn("$name · ${card.topic}", question, avatarKey)
+            appendLog("[QUIZ ASK ${idx + 1}/${studyDeck.cards.size} · ${card.topic}] (${"%.0f".format(llmMs)}ms): $question")
+            speakReply(avatarKey, question)
+            quizAwaitingAnswer = true
+            statusBadge = "Your turn · ${card.topic}"
+        }
+
+        fun startStudyQuiz() {
+            if (busy || !ready || studyDeck.cards.isEmpty()) return
+            quizActive = true
+            quizCardIdx = 0
+            quizMastered = 0
+            quizRetryCount = 0
+            quizCompleted = false
+            quizAwaitingAnswer = false
+            activeJob = uiScope.launch {
+                busy = true
+                try {
+                    chatHistory.add(ChatTurn("System", "Voice Study Quiz: ${studyDeck.title} (${studyDeck.cards.size} cards)"))
+                    runCatching { chatListState.animateScrollToItem(chatHistory.lastIndex) }
+                    askQuizCardSuspended(0)
+                } catch (_: CancellationException) {
+                    statusBadge = "Stopped"
+                } catch (e: Throwable) {
+                    appendLog("QUIZ ERROR: ${e.message}")
+                    statusBadge = "Ready"
+                } finally {
+                    busy = false
+                }
+            }
+        }
+
+        fun skipQuizCard() {
+            if (!quizActive || busy || !ready) return
+            activeJob = uiScope.launch {
+                busy = true
+                try {
+                    askQuizCardSuspended(quizCardIdx + 1)
+                } catch (_: CancellationException) {
+                    statusBadge = "Stopped"
+                } catch (e: Throwable) {
+                    appendLog("QUIZ SKIP ERROR: ${e.message}")
+                } finally {
+                    busy = false
+                }
+            }
+        }
+
+        fun endStudyQuiz() {
+            stopActivePlayback()
+            quizActive = false
+            quizAwaitingAnswer = false
+            quizCompleted = false
+            chatHistory.add(ChatTurn("System", "Study quiz ended ($quizMastered/${studyDeck.cards.size} mastered)."))
+            statusBadge = "Ready"
+        }
+
         fun sendQuestion(q: String) {
             val trimmed = q.trim()
             if (trimmed.isEmpty() || busy || !ready) return
             inputText = ""
+
+            // Route spoken/typed answer directly into the Voice Study Quiz evaluator when active!
+            if (quizActive && quizAwaitingAnswer && !quizCompleted && quizCardIdx < studyDeck.cards.size) {
+                activeJob = uiScope.launch {
+                    busy = true
+                    quizAwaitingAnswer = false
+                    try {
+                        val card = studyDeck.cards[quizCardIdx]
+                        val avatarKey = activeAvatar
+                        val name = pipeline.avatars[avatarKey]?.displayName ?: "Puck"
+                        val allowRetry = (quizRetryCount == 0)
+
+                        chatHistory.add(ChatTurn("You", trimmed))
+                        val evalIdx = chatHistory.size
+                        chatHistory.add(ChatTurn(name, "Checking answer…", avatarKey))
+                        runCatching { chatListState.animateScrollToItem(chatHistory.lastIndex) }
+
+                        statusBadge = "Evaluating (${card.topic})…"
+                        val (feedback, passed, llmMs) = if (nanoLlm.isReady) {
+                            withContext(Dispatchers.IO) {
+                                nanoLlm.evaluateStudyAnswer(avatarKey, card, quizLastQuestion, trimmed, allowRetry) { partial ->
+                                    uiScope.launch {
+                                        if (evalIdx < chatHistory.size) {
+                                            chatHistory[evalIdx] = ChatTurn(name, "$partial▌", avatarKey)
+                                        }
+                                    }
+                                }
+                            }
+                        } else {
+                            val (fb, ok) = StudyGuideParser.fallbackEvaluate(card, trimmed, allowRetry)
+                            Triple(fb, ok, 1.0)
+                        }
+                        metricLlm = if (nanoLlm.isReady) "${"%.0f".format(llmMs)} ms" else "Card"
+                        val tag = if (passed) "[PASS]" else "[RETRY]"
+                        chatHistory[evalIdx] = ChatTurn("$name · ${if (passed) "✓ ${card.topic}" else "Hint"}", feedback, avatarKey)
+                        appendLog("[QUIZ EVAL ${card.topic} $tag] (${"%.0f".format(llmMs)}ms): $feedback")
+
+                        speakReply(avatarKey, feedback)
+
+                        if (passed) {
+                            quizMastered++
+                            delay(350)
+                            askQuizCardSuspended(quizCardIdx + 1)
+                        } else {
+                            quizRetryCount++
+                            quizAwaitingAnswer = true
+                            statusBadge = "Try again · ${card.topic}"
+                        }
+                    } catch (_: CancellationException) {
+                        statusBadge = "Stopped"
+                    } catch (e: Throwable) {
+                        appendLog("QUIZ EVAL ERROR: ${e.message}")
+                        chatHistory.add(ChatTurn("System", "Error: ${e.message}"))
+                        quizAwaitingAnswer = true
+                        statusBadge = "Ready"
+                    } finally {
+                        busy = false
+                    }
+                }
+                return
+            }
+
             activeJob = uiScope.launch {
                 busy = true
                 try {
@@ -768,6 +933,27 @@ class MainActivity : ComponentActivity() {
             if (!spoken.isNullOrBlank()) sendQuestion(spoken)
         }
 
+        val studyFileLauncher = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+            if (uri != null) {
+                runCatching {
+                    val raw = contentResolver.openInputStream(uri)?.bufferedReader()?.use { it.readText() }.orEmpty()
+                    val parsed = StudyGuideParser.parse(raw, "Custom Study Guide")
+                    if (parsed.cards.isNotEmpty()) {
+                        studyDeck = parsed
+                        quizActive = false
+                        quizCardIdx = 0
+                        quizMastered = 0
+                        chatHistory.add(ChatTurn("System", "Loaded study guide: ${parsed.title} (${parsed.cards.size} cards). Tap ★ Quiz to begin!"))
+                        appendLog("Loaded custom study guide: ${parsed.title} (${parsed.cards.size} cards)")
+                    } else {
+                        chatHistory.add(ChatTurn("System", "No study cards found in selected file. Use [CARD 1] / TOPIC: / FACTS: format."))
+                    }
+                }.onFailure { e ->
+                    appendLog("Failed reading study guide: ${e.message}")
+                }
+            }
+        }
+
         LaunchedEffect(Unit) {
             bootPipeline(preferGpu)
         }
@@ -815,9 +1001,30 @@ class MainActivity : ComponentActivity() {
                     frameVersion = frameVersion,
                     chatHistory = chatHistory,
                     chatListState = chatListState,
+                    quiz = QuizUiSnapshot(
+                        active = quizActive,
+                        deckTitle = studyDeck.title,
+                        cardIndex = quizCardIdx,
+                        totalCards = studyDeck.cards.size,
+                        currentTopic = studyDeck.cards.getOrNull(quizCardIdx)?.topic ?: "",
+                        masteredCount = quizMastered,
+                        awaitingAnswer = quizAwaitingAnswer,
+                        retryCount = quizRetryCount,
+                        completed = quizCompleted,
+                    ),
                 ),
                 onSelectAvatar = { selectAvatar(it) },
-                onRunThreeTurnDemo = { runThreeTurnDemo() },
+                onRunThreeTurnDemo = {
+                    if (quizActive) endStudyQuiz()
+                    runThreeTurnDemo()
+                },
+                onStartStudyQuiz = { startStudyQuiz() },
+                onSkipQuizCard = { skipQuizCard() },
+                onEndStudyQuiz = { endStudyQuiz() },
+                onLoadStudyGuideFile = { runCatching { studyFileLauncher.launch(arrayOf("text/plain", "text/markdown", "*/*")) } },
+                onResetStudyGuide = {
+                    studyDeck = StudyGuideParser.loadBundledSolarSystem(this@MainActivity)
+                },
                 onStop = { stopActivePlayback() },
                 onInputChange = { inputText = it },
                 onSendQuestion = { sendQuestion(it) },

@@ -70,6 +70,7 @@ data class StudioUiState(
     val frameVersion: Int,
     val chatHistory: List<ChatTurn>,
     val chatListState: LazyListState,
+    val quiz: QuizUiSnapshot = QuizUiSnapshot(),
 )
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -78,6 +79,11 @@ fun StudioUiV2(
     state: StudioUiState,
     onSelectAvatar: (String) -> Unit,
     onRunThreeTurnDemo: () -> Unit,
+    onStartStudyQuiz: () -> Unit,
+    onSkipQuizCard: () -> Unit,
+    onEndStudyQuiz: () -> Unit,
+    onLoadStudyGuideFile: () -> Unit,
+    onResetStudyGuide: () -> Unit,
     onStop: () -> Unit,
     onInputChange: (String) -> Unit,
     onSendQuestion: (String) -> Unit,
@@ -271,10 +277,10 @@ fun StudioUiV2(
                 }
             }
 
-            // 3. Clear Visual Hierarchy Control Bar: Segmented Avatar Toggle + Single Solid Primary CTA
+            // 3. Clear Visual Hierarchy Control Bar: Segmented Avatar Toggle + Demo + Primary Voice Quiz CTA
             Row(
                 modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(10.dp),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
                 // Sleek Segmented Control (Puck | Gretchen)
@@ -309,12 +315,12 @@ fun StudioUiV2(
                                 fontSize = 13.sp,
                                 fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Medium,
                                 maxLines = 1,
+                                softWrap = false,
                             )
                         }
                     }
                 }
 
-                // Single Solid Primary CTA (3-Turn Demo -> Stop while active)
                 if (state.busy) {
                     Button(
                         onClick = onStop,
@@ -326,23 +332,119 @@ fun StudioUiV2(
                         contentPadding = PaddingValues(horizontal = 18.dp, vertical = 0.dp),
                         modifier = Modifier.height(44.dp),
                     ) {
-                        Text("■  Stop", fontSize = 13.sp, fontWeight = FontWeight.SemiBold, maxLines = 1)
+                        Text("■  Stop", fontSize = 13.sp, fontWeight = FontWeight.SemiBold, maxLines = 1, softWrap = false)
                     }
                 } else {
+                    // Secondary compact 3-Turn Demo button
                     Button(
                         onClick = onRunThreeTurnDemo,
                         enabled = state.ready,
                         shape = RoundedCornerShape(16.dp),
                         colors = ButtonDefaults.buttonColors(
-                            containerColor = primaryBlue,
+                            containerColor = surfaceHigher,
+                            contentColor = textPrimary,
+                            disabledContainerColor = surfaceElevated,
+                            disabledContentColor = textSecondary,
+                        ),
+                        contentPadding = PaddingValues(horizontal = 13.dp, vertical = 0.dp),
+                        modifier = Modifier.height(44.dp),
+                    ) {
+                        Text("▶ Demo", fontSize = 12.sp, fontWeight = FontWeight.Medium, maxLines = 1, softWrap = false)
+                    }
+
+                    // Single Solid Primary CTA: Voice Study Quiz (or Restart when active)
+                    Button(
+                        onClick = { if (state.quiz.active) onEndStudyQuiz() else onStartStudyQuiz() },
+                        enabled = state.ready,
+                        shape = RoundedCornerShape(16.dp),
+                        colors = ButtonDefaults.buttonColors(
+                            containerColor = if (state.quiz.active) surfaceActive else primaryBlue,
                             contentColor = Color.White,
                             disabledContainerColor = surfaceElevated,
                             disabledContentColor = textSecondary,
                         ),
-                        contentPadding = PaddingValues(horizontal = 18.dp, vertical = 0.dp),
+                        contentPadding = PaddingValues(horizontal = 14.dp, vertical = 0.dp),
                         modifier = Modifier.height(44.dp),
                     ) {
-                        Text("▶  3-Turn Demo", fontSize = 13.sp, fontWeight = FontWeight.SemiBold, maxLines = 1)
+                        Text(
+                            text = if (state.quiz.active) "End Quiz" else "★ Quiz",
+                            fontSize = 13.sp,
+                            fontWeight = FontWeight.SemiBold,
+                            maxLines = 1,
+                            softWrap = false,
+                        )
+                    }
+                }
+            }
+
+            // 3b. Active Study Quiz Progress Strip (progressive disclosure — hidden when not quizzing!)
+            if (state.quiz.active) {
+                val progress = if (state.quiz.totalCards > 0) {
+                    (state.quiz.masteredCount.toFloat() / state.quiz.totalCards.toFloat()).coerceIn(0f, 1f)
+                } else 0f
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clip(RoundedCornerShape(16.dp))
+                        .background(surfaceElevated)
+                        .padding(horizontal = 14.dp, vertical = 10.dp),
+                    verticalArrangement = Arrangement.spacedBy(7.dp),
+                ) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                            modifier = Modifier.weight(1f),
+                        ) {
+                            Text(
+                                text = if (state.quiz.completed) "Quiz Complete"
+                                else "Card ${state.quiz.cardIndex + 1}/${state.quiz.totalCards} · ${state.quiz.currentTopic}",
+                                color = textPrimary,
+                                fontSize = 12.sp,
+                                fontWeight = FontWeight.SemiBold,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                            )
+                            Text(
+                                text = "${state.quiz.masteredCount}/${state.quiz.totalCards} mastered",
+                                color = emerald,
+                                fontSize = 11.sp,
+                                fontFamily = FontFamily.Monospace,
+                                maxLines = 1,
+                            )
+                        }
+                        if (!state.quiz.completed && !state.busy) {
+                            Text(
+                                text = "Skip →",
+                                color = primaryBlue,
+                                fontSize = 12.sp,
+                                fontWeight = FontWeight.SemiBold,
+                                modifier = Modifier
+                                    .clip(RoundedCornerShape(8.dp))
+                                    .clickable { onSkipQuizCard() }
+                                    .padding(horizontal = 6.dp, vertical = 2.dp),
+                            )
+                        }
+                    }
+                    // Slim modern progress bar
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(4.dp)
+                            .clip(RoundedCornerShape(999.dp))
+                            .background(surfaceHigher),
+                    ) {
+                        Box(
+                            modifier = Modifier
+                                .fillMaxWidth(progress.coerceAtLeast(0.04f))
+                                .fillMaxHeight()
+                                .clip(RoundedCornerShape(999.dp))
+                                .background(emerald),
+                        )
                     }
                 }
             }
@@ -365,7 +467,7 @@ fun StudioUiV2(
                             contentAlignment = Alignment.Center,
                         ) {
                             Text(
-                                text = "Ask Puck or Gretchen anything,\nor tap 3-Turn Demo to watch them talk.",
+                                text = "Ask Puck or Gretchen anything,\nor tap ★ Quiz for an offline voice study session.",
                                 color = textSecondary,
                                 fontSize = 13.sp,
                                 lineHeight = 19.sp,
@@ -460,8 +562,9 @@ fun StudioUiV2(
                 ) {
                     if (state.inputText.isEmpty()) {
                         Text(
-                            text = "Ask Puck or Gretchen…",
-                            color = textSecondary,
+                            text = if (state.quiz.active && state.quiz.awaitingAnswer) "Speak or type your answer…"
+                            else "Ask Puck or Gretchen…",
+                            color = if (state.quiz.active && state.quiz.awaitingAnswer) Color(0xFF79C0FF) else textSecondary,
                             fontSize = 14.sp,
                             maxLines = 1,
                         )
@@ -778,6 +881,49 @@ fun StudioUiV2(
                                 }
                             }
                         }
+                    }
+                }
+
+                // Study Quiz Deck (.txt / .md file loader)
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text("Voice Study Guide (.txt / .md)", color = textSecondary, fontSize = 12.sp, fontWeight = FontWeight.Medium)
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clip(RoundedCornerShape(14.dp))
+                            .background(bgCanvas)
+                            .padding(horizontal = 14.dp, vertical = 12.dp),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(state.quiz.deckTitle, color = textPrimary, fontSize = 13.sp, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                            Text("${state.quiz.totalCards} study cards · zero-bloat per-card Nano context", color = textSecondary, fontSize = 11.sp)
+                        }
+                    }
+                    Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                        Button(
+                            onClick = {
+                                showSettingsSheet = false
+                                onLoadStudyGuideFile()
+                            },
+                            enabled = !state.busy,
+                            shape = RoundedCornerShape(14.dp),
+                            colors = ButtonDefaults.buttonColors(containerColor = surfaceHigher, contentColor = textPrimary),
+                            modifier = Modifier.weight(1f).height(40.dp),
+                        ) { Text("Load .txt Guide", fontSize = 12.sp, fontWeight = FontWeight.Medium) }
+
+                        Button(
+                            onClick = {
+                                onResetStudyGuide()
+                                showSettingsSheet = false
+                                if (state.ready && !state.busy) onStartStudyQuiz()
+                            },
+                            enabled = state.ready && !state.busy,
+                            shape = RoundedCornerShape(14.dp),
+                            colors = ButtonDefaults.buttonColors(containerColor = primaryBlue, contentColor = Color.White),
+                            modifier = Modifier.weight(1f).height(40.dp),
+                        ) { Text("Start Solar Quiz", fontSize = 12.sp, fontWeight = FontWeight.SemiBold) }
                     }
                 }
 

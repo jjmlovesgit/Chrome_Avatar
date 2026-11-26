@@ -1,0 +1,41 @@
+# SOLAR SYSTEM STUDY GUIDE
+
+[CARD 1]
+TOPIC: Mercury
+FACTS: Closest planet to the Sun; smallest planet in our solar system; extreme temperature swings from minus 180 to 430 degrees Celsius; has almost no atmosphere to trap heat.
+KEY_CONCEPT: Closest to the Sun and lacks an atmosphere to retain heat.
+
+[CARD 2]
+TOPIC: Venus
+FACTS: Second planet from the Sun; hottest planet due to a thick carbon dioxide greenhouse atmosphere; rotates backward in retrograde motion; similar in size to Earth.
+KEY_CONCEPT: Runaway greenhouse effect from thick carbon dioxide and retrograde rotation.
+
+[CARD 3]
+TOPIC: Earth
+FACTS: Third planet from the Sun; only known world with liquid surface water and life; nitrogen and oxygen atmosphere protects the surface; has one large natural moon.
+KEY_CONCEPT: Liquid surface water, protective atmosphere, and life.
+
+[CARD 4]
+TOPIC: Mars
+FACTS: Fourth planet from the Sun; red color comes from iron oxide dust or rust; home to Olympus Mons, the largest volcano in the solar system; has two tiny moons, Phobos and Deimos.
+KEY_CONCEPT: Iron oxide rust surface, Olympus Mons volcano, and moons Phobos and Deimos.
+
+[CARD 5]
+TOPIC: Jupiter
+FACTS: Fifth planet from the Sun and the largest planet; a gas giant made mostly of hydrogen and helium; famous for the Great Red Spot, a giant centuries-old storm; has dozens of moons including Europa and Ganymede.
+KEY_CONCEPT: Largest gas giant and the Great Red Spot storm.
+
+[CARD 6]
+TOPIC: Saturn
+FACTS: Sixth planet from the Sun; gas giant famous for its bright icy ring system; lowest density of any planet, lower than liquid water; largest moon is Titan.
+KEY_CONCEPT: Prominent icy rings and lowest planetary density.
+
+[CARD 7]
+TOPIC: Uranus
+FACTS: Seventh planet from the Sun; an ice giant with a pale cyan color from methane gas; rotates almost completely on its side at a 98-degree tilt.
+KEY_CONCEPT: Ice giant colored by methane that spins sideways.
+
+[CARD 8]
+TOPIC: Neptune
+FACTS: Eighth and farthest recognized planet from the Sun; deep blue ice giant; fastest supersonic winds in the solar system; largest moon is Triton.
+KEY_CONCEPT: Farthest planet with the strongest winds in the solar system.

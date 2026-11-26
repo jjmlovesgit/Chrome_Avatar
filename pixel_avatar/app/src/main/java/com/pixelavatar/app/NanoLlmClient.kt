@@ -247,6 +247,51 @@ class NanoLlmClient {
         return Triple(spoken, passed, ms)
     }
 
+    /**
+     * On-Device Gmail Notification Brief: Injects ONLY the captured notification snippets
+     * (~150 tokens) into Gemini Nano for a natural spoken executive summary.
+     */
+    suspend fun summarizeEmails(
+        avatarKey: String,
+        emails: List<GmailSnippet>,
+        userRequest: String,
+        onPartial: ((String) -> Unit)? = null,
+    ): Pair<String, Double> {
+        val personaName = if (avatarKey == "gretchen") "Gretchen" else "Puck"
+        val prompt = buildString {
+            append("SYSTEM:\n")
+            append("You are $personaName, a helpful on-device voice assistant reading recent Gmail notifications aloud.\n")
+            append("Rules:\n")
+            append("1. Speak in 1 to 2 natural, concise conversational sentences under 40 words (no markdown, bullets, or URLs).\n")
+            append("2. Report ONLY what is in the EMAIL NOTIFICATIONS below. Never invent details.\n")
+            append("3. Clearly mention who sent the latest email and its main point.\n\n")
+            append("EMAIL NOTIFICATIONS (newest first):\n")
+            emails.take(3).forEachIndexed { idx, e ->
+                append("${idx + 1}. From: ${e.sender} | Snippet: ${e.bestBody().take(240)}\n")
+            }
+            append("\nUSER REQUEST: $userRequest\n")
+            append("$personaName:")
+        }
+        val request = GenerateContentRequest.Builder(TextPart(prompt)).apply {
+            temperature = 0.4f
+            topK = 24
+            candidateCount = 1
+            maxOutputTokens = 84
+            enableThinking = false
+        }.build()
+
+        val (raw, ms) = runNanoRequest(request, personaName, onPartial)
+        val finalBrief = if (raw.length >= 10) raw else fallbackEmailBrief(emails)
+        return finalBrief to ms
+    }
+
+    fun fallbackEmailBrief(emails: List<GmailSnippet>): String {
+        val latest = emails.firstOrNull() ?: return "I don't see any active Gmail notifications right now."
+        val body = latest.bestBody().replace('\n', ' ').replace(Regex("\\s+"), " ").take(140)
+        val extra = if (emails.size > 1) " You also have ${emails.size - 1} other recent Gmail notification${if (emails.size > 2) "s" else ""}." else ""
+        return "Your latest email is from ${latest.sender}. It says: $body.$extra"
+    }
+
     private suspend fun runNanoRequest(
         request: GenerateContentRequest,
         personaName: String,

@@ -250,6 +250,8 @@ class MainActivity : ComponentActivity() {
         var quizAwaitingAnswer by remember { mutableStateOf(false) }
         var quizCompleted by remember { mutableStateOf(false) }
         var quizLastQuestion by remember { mutableStateOf("") }
+        var gmailAccessGranted by remember { mutableStateOf(GmailNotificationListener.isPermissionGranted(this@MainActivity)) }
+        var gmailCachedCount by remember { mutableIntStateOf(GmailNotificationListener.cachedCount()) }
         val defaultDemoTopic = "What you did last weekend"
         val xShowcaseTopic = "★ X Demo Script (LiteRT Showcase)"
         var demoTopic by remember { mutableStateOf(defaultDemoTopic) }
@@ -306,6 +308,8 @@ class MainActivity : ComponentActivity() {
             val (m, s) = readMemHud()
             memMain = m
             memSub = "${pipeline.activeAcceleratorLabel} · $s"
+            gmailAccessGranted = GmailNotificationListener.isPermissionGranted(this@MainActivity)
+            gmailCachedCount = GmailNotificationListener.cachedCount()
         }
 
         fun selectAvatar(key: String) {
@@ -709,10 +713,84 @@ class MainActivity : ComponentActivity() {
             statusBadge = "Ready"
         }
 
+        fun isEmailQuery(text: String): Boolean {
+            val lower = text.lowercase()
+            return Regex("\\b(email|emails|gmail|inbox|mail)\\b").containsMatchIn(lower) &&
+                Regex("\\b(read|check|last|latest|recent|new|any|summarize|summary|what|tell|got)\\b").containsMatchIn(lower)
+        }
+
+        fun readGmailBrief(userPrompt: String = "Read my last email") {
+            if (busy || !ready) return
+            val target = detectAddressedAvatar(userPrompt, activeAvatar)
+            selectAvatar(target)
+            activeJob = uiScope.launch {
+                busy = true
+                try {
+                    val name = pipeline.avatars[target]?.displayName ?: "Puck"
+                    chatHistory.add(ChatTurn("You", userPrompt))
+                    val bubbleIdx = chatHistory.size
+                    chatHistory.add(ChatTurn("$name · Gmail", "Checking notifications…", target))
+                    runCatching { chatListState.animateScrollToItem(chatHistory.lastIndex) }
+
+                    gmailAccessGranted = GmailNotificationListener.isPermissionGranted(this@MainActivity)
+                    if (!gmailAccessGranted) {
+                        val msg = "Notification access for Gmail isn't enabled yet. I'm opening Android Notification Access now — toggle Pixel Avatar on, then ask me again!"
+                        chatHistory[bubbleIdx] = ChatTurn("$name · Gmail", msg, target)
+                        appendLog("[GMAIL] Permission not granted — opening ACTION_NOTIFICATION_LISTENER_SETTINGS")
+                        speakReply(target, msg)
+                        GmailNotificationListener.openNotificationAccessSettings(this@MainActivity)
+                        return@launch
+                    }
+
+                    val emails = GmailNotificationListener.getLatestEmails(3)
+                    gmailCachedCount = emails.size
+                    if (emails.isEmpty()) {
+                        val msg = "I don't see any active Gmail notifications in your shade right now. Send yourself a quick test email and ask me again!"
+                        chatHistory[bubbleIdx] = ChatTurn("$name · Gmail", msg, target)
+                        appendLog("[GMAIL] Connected, 0 active/recent Gmail notifications found.")
+                        speakReply(target, msg)
+                        return@launch
+                    }
+
+                    statusBadge = "Reading Gmail ($name)…"
+                    val (brief, llmMs) = if (nanoLlm.isReady) {
+                        withContext(Dispatchers.IO) {
+                            nanoLlm.summarizeEmails(target, emails, userPrompt) { partial ->
+                                uiScope.launch {
+                                    if (bubbleIdx < chatHistory.size) {
+                                        chatHistory[bubbleIdx] = ChatTurn("$name · Gmail", "$partial▌", target)
+                                    }
+                                }
+                            }
+                        }
+                    } else {
+                        nanoLlm.fallbackEmailBrief(emails) to 1.0
+                    }
+                    metricLlm = if (nanoLlm.isReady) "${"%.0f".format(llmMs)} ms" else "Local"
+                    chatHistory[bubbleIdx] = ChatTurn("$name · Gmail", brief, target)
+                    appendLog("[GMAIL BRIEF · ${emails.size} msg(s)] (${"%.0f".format(llmMs)}ms): $brief")
+                    speakReply(target, brief)
+                } catch (_: CancellationException) {
+                    statusBadge = "Stopped"
+                } catch (e: Throwable) {
+                    appendLog("GMAIL ERROR: ${e.message}")
+                    statusBadge = "Ready"
+                } finally {
+                    busy = false
+                }
+            }
+        }
+
         fun sendQuestion(q: String) {
             val trimmed = q.trim()
             if (trimmed.isEmpty() || busy || !ready) return
             inputText = ""
+
+            // Route spoken/typed Gmail requests directly to our on-device NotificationListenerService!
+            if (!quizActive && isEmailQuery(trimmed)) {
+                readGmailBrief(trimmed)
+                return
+            }
 
             // Route spoken/typed answer directly into the Voice Study Quiz evaluator when active!
             if (quizActive && quizAwaitingAnswer && !quizCompleted && quizCardIdx < studyDeck.cards.size) {
@@ -1012,6 +1090,8 @@ class MainActivity : ComponentActivity() {
                         retryCount = quizRetryCount,
                         completed = quizCompleted,
                     ),
+                    gmailAccessGranted = gmailAccessGranted,
+                    gmailCachedCount = gmailCachedCount,
                 ),
                 onSelectAvatar = { selectAvatar(it) },
                 onRunThreeTurnDemo = {
@@ -1025,6 +1105,8 @@ class MainActivity : ComponentActivity() {
                 onResetStudyGuide = {
                     studyDeck = StudyGuideParser.loadBundledSolarSystem(this@MainActivity)
                 },
+                onOpenGmailAccessSettings = { GmailNotificationListener.openNotificationAccessSettings(this@MainActivity) },
+                onReadLastEmail = { readGmailBrief("Read my last email") },
                 onStop = { stopActivePlayback() },
                 onInputChange = { inputText = it },
                 onSendQuestion = { sendQuestion(it) },

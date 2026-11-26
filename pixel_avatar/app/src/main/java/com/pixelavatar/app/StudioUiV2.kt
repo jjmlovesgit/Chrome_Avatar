@@ -71,6 +71,8 @@ data class StudioUiState(
     val chatHistory: List<ChatTurn>,
     val chatListState: LazyListState,
     val quiz: QuizUiSnapshot = QuizUiSnapshot(),
+    val gmailAccessGranted: Boolean = false,
+    val gmailCachedCount: Int = 0,
 )
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -84,6 +86,8 @@ fun StudioUiV2(
     onEndStudyQuiz: () -> Unit,
     onLoadStudyGuideFile: () -> Unit,
     onResetStudyGuide: () -> Unit,
+    onOpenGmailAccessSettings: () -> Unit,
+    onReadLastEmail: () -> Unit,
     onStop: () -> Unit,
     onInputChange: (String) -> Unit,
     onSendQuestion: (String) -> Unit,
@@ -881,6 +885,72 @@ fun StudioUiV2(
                                 }
                             }
                         }
+                    }
+                }
+
+                // On-Device Gmail Notification Reader (Option 1: zero OAuth, 100% local!)
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text("Gmail Notification Reader (100% On-Device)", color = textSecondary, fontSize = 12.sp, fontWeight = FontWeight.Medium)
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clip(RoundedCornerShape(14.dp))
+                            .background(bgCanvas)
+                            .padding(horizontal = 14.dp, vertical = 12.dp),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(
+                                text = if (state.gmailAccessGranted) "Notification Access Connected" else "Notification Access Off",
+                                color = if (state.gmailAccessGranted) emerald else amber,
+                                fontSize = 13.sp,
+                                fontWeight = FontWeight.SemiBold,
+                            )
+                            Text(
+                                text = if (state.gmailAccessGranted) {
+                                    "${state.gmailCachedCount} Gmail notification${if (state.gmailCachedCount == 1) "" else "s"} captured · say \"Read my last email\""
+                                } else {
+                                    "Enable access so Puck/Gretchen can read Gmail shade notifications"
+                                },
+                                color = textSecondary,
+                                fontSize = 11.sp,
+                            )
+                        }
+                    }
+                    Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                        Button(
+                            onClick = {
+                                showSettingsSheet = false
+                                onOpenGmailAccessSettings()
+                            },
+                            shape = RoundedCornerShape(14.dp),
+                            colors = ButtonDefaults.buttonColors(
+                                containerColor = if (state.gmailAccessGranted) surfaceHigher else primaryBlue,
+                                contentColor = if (state.gmailAccessGranted) textPrimary else Color.White,
+                            ),
+                            modifier = Modifier.weight(1f).height(40.dp),
+                        ) {
+                            Text(
+                                text = if (state.gmailAccessGranted) "Access Settings" else "Enable Access",
+                                fontSize = 12.sp,
+                                fontWeight = FontWeight.SemiBold,
+                            )
+                        }
+
+                        Button(
+                            onClick = {
+                                showSettingsSheet = false
+                                onReadLastEmail()
+                            },
+                            enabled = state.ready && !state.busy,
+                            shape = RoundedCornerShape(14.dp),
+                            colors = ButtonDefaults.buttonColors(
+                                containerColor = if (state.gmailAccessGranted) primaryBlue else surfaceHigher,
+                                contentColor = if (state.gmailAccessGranted) Color.White else textSecondary,
+                            ),
+                            modifier = Modifier.weight(1f).height(40.dp),
+                        ) { Text("Read Last Email", fontSize = 12.sp, fontWeight = FontWeight.SemiBold) }
                     }
                 }
 

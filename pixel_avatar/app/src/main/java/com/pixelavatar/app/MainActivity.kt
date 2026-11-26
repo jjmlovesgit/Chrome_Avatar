@@ -661,9 +661,9 @@ class MainActivity : ComponentActivity() {
                         )
                     )
                     val scriptedLines = listOf(
-                        "puck" to "Hey everyone on X! I'm Puck, and right now you're watching me run one hundred percent offline on a Google Pixel 10 — zero cloud servers, zero Python, even in Airplane Mode. Gretchen, tell them how we pulled off forty frames a second right here on a phone!",
-                        "gretchen" to "Thanks, Puck! Every model in our stack was authored directly from safetensors in C++ using Google's LiteRT Tensor API, with zero unsupported GPU ops. We then distilled a 143-megabyte StyleGAN and Swin teacher down into a 6.7-megabyte mobile student running at 38 to 42 frames per second on Pixel 10's GPU — using under 850 megabytes of RAM!",
-                        "puck" to "And the exact same LiteRT pipeline also runs at over 54 frames per second in desktop Chrome WebGPU with Gemini Nano built right in! Check out the open-source Chrome Avatar repo on GitHub to run both yourself — and shout out to the LiteRT team!",
+                        "puck" to "Hey everyone on X! I'm Puck, and right now you're watching me render in native 512 by 512 HD, one hundred percent offline on a Google Pixel 10 — zero cloud servers, zero Python, even in Airplane Mode. Gretchen, tell them how we pulled this off right on a phone!",
+                        "gretchen" to "Thanks, Puck! Every model in our stack was authored directly from safetensors in C++ using Google's LiteRT Tensor API, with zero unsupported GPU ops. We then distilled a 143-megabyte StyleGAN and Swin teacher down into an 11.4-megabyte native 512 by 512 student trained with perceptual and PatchGAN sharpness — running real-time on Pixel 10's GPU under one gigabyte of RAM!",
+                        "puck" to "And that exact same 11.4-megabyte LiteRT model flies at over 85 frames per second in desktop Chrome WebGPU using just one gigabyte of VRAM — with Gemini Nano built right in on both Chrome and Pixel 10! Check out the open-source Chrome Avatar repo on GitHub to run both yourself — and shout out to the LiteRT team!",
                     )
                     val turns = if (isScriptedShowcase) {
                         scriptedLines

@@ -121,13 +121,13 @@ Chrome_Avatar/
 └── pixel_avatar/                # 100% Offline Native Android Studio Project (Kotlin + Compose)
     ├── build.gradle.kts         # Gradle 8.13 + Kotlin 2.4.0
     └── app/
-        ├── build.gradle.kts     # LiteRT 2.3.0 (litert + litert-gpu) + ML Kit GenAI Prompt (AICore Nano)
+        ├── build.gradle.kts     # LiteRT 2.3.0 (litert + litert-gpu) + ML Kit GenAI Prompt & TTS (AICore)
         └── src/main/
             ├── java/com/pixelavatar/app/
-            │   ├── MainActivity.kt      # Dark Compose Studio (Live / 12.5FPS / 25FPS, 3-Turn Demo, Mic, RAM HUD)
+            │   ├── MainActivity.kt      # Dark Compose Studio (Live/12.5/25FPS, Voice cycle, Topic/X Showcase, Mic, RAM HUD)
             │   ├── AvatarPipeline.kt    # Native LiteRT 2.3.0 WGPU-FP16 3-model engine + auto-download
-            │   ├── NanoLlmClient.kt     # Pixel 10 AICore Gemini Nano client
-            │   └── AndroidTtsEngine.kt  # Offline Android Neural TTS -> 16 kHz mono PCM WAV
+            │   ├── NanoLlmClient.kt     # Pixel 10 AICore Gemini Nano client (parallel warmup, streaming, disable-thinking)
+            │   └── AndroidTtsEngine.kt  # Offline Android SEANet Neural TTS (tpd/iog defaults, 9-voice cycle) + ML Kit GenAI TTS ready
             ├── res/                     # Custom Gretchen adaptive circular launcher icon
             └── assets/avatars/          # Bundled Puck & Gretchen face caches + blink_delta
 ```
@@ -194,7 +194,9 @@ Open a **normal (non-Incognito) Google Chrome** window *(use Google Chrome rathe
 3. **First launch:** The app automatically downloads the 3 FP16-weight `.tflite` models (`wav2vec2_2s_fp16w.tflite`, `fm_step_fp16w.tflite`, and our distilled **`student_renderer_256_fp16w.tflite`** `6.74 MB` — `261 MB` total) from [Release `v1.0.0`](https://github.com/jjmlovesgit/Chrome_Avatar/releases/tag/v1.0.0) into app-private storage, compiles them on **LiteRT `2.3.0` (`WGPU-FP16`)**, and warms up **AICore Gemini Nano** in parallel.
 4. **After first launch:** Unplug USB and turn on Airplane Mode — **Pixel Avatar** (Gretchen's circular icon in your app drawer) runs **100% offline** at **33–42 FPS**!
    - Tap **Puck** / **Gretchen** or **3-Turn Demo** to watch pipelined `0.2 s`-handoff live banter, or tap **Mic** / type to ask anything.
-   - Lip-sync locks directly to the hardware `MediaPlayer` audio clock in **`Playback: Live (Zero-Wait)`** mode (full 25 FPS synced with zero buffering).
+   - Tap **Topic** to set any custom 3-turn conversation prompt, pick a 1-tap preset (including **`★ X Demo Script (LiteRT Showcase)`**), or tap **Reset Default** to return to *"What you did last weekend"*.
+   - Tap **Voice: tpd** / **Voice: iog** to cycle & audition all local offline voices per avatar (defaults: Puck = `tpd`, Gretchen = `iog`; also wired with `com.google.mlkit:genai-text-to-speech:1.0.0-alpha1` to auto-upgrade to 24 kHz `star*` diffusion voices once unlocked by Google).
+   - Lip-sync locks directly to the hardware `MediaPlayer` audio clock in **`Live`** mode (full 25 FPS synced with zero buffering; tap **Live** to toggle `12.5FPS` / `25FPS` Smooth).
    - To mirror your Pixel 10 screen on your PC inside Android Studio, open **View → Tool Windows → Running Devices**.
 
 ---

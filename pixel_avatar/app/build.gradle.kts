@@ -60,4 +60,7 @@ dependencies {
 
     // Google ML Kit GenAI Prompt API (Pixel 10 built-in AICore Gemini Nano)
     implementation("com.google.mlkit:genai-prompt:1.0.0-beta5")
+
+    // Google ML Kit GenAI Text-to-Speech API (Pixel 10 on-device 24 kHz diffusion voices via AICore)
+    implementation("com.google.mlkit:genai-text-to-speech:1.0.0-alpha1")
 }

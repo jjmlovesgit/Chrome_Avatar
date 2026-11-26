@@ -103,6 +103,11 @@ class MainActivity : ComponentActivity() {
         // 2 = Live (zero-wait raw GPU, default), 0 = 12.5 FPS Smooth, 1 = 25 FPS Smooth
         var playbackMode by remember { mutableIntStateOf(2) }
         var activeAvatar by remember { mutableStateOf("puck") }
+        var voiceLabel by remember { mutableStateOf("tpd") }
+        val defaultDemoTopic = "What you did last weekend"
+        val xShowcaseTopic = "★ X Demo Script (LiteRT Showcase)"
+        var demoTopic by remember { mutableStateOf(defaultDemoTopic) }
+        var showTopicDialog by remember { mutableStateOf(false) }
         var statusBadge by remember { mutableStateOf("Booting LiteRT…") }
         var nanoBadge by remember { mutableStateOf("Checking AICore…") }
         var inputText by remember { mutableStateOf("") }
@@ -156,6 +161,7 @@ class MainActivity : ComponentActivity() {
 
         fun selectAvatar(key: String) {
             activeAvatar = key
+            voiceLabel = ttsEngine.shortVoiceName(key)
             pipeline.avatars[key]?.let { av ->
                 frameBmp = av.portrait
                 frameVersion++
@@ -217,12 +223,17 @@ class MainActivity : ComponentActivity() {
                 val t0 = System.nanoTime()
                 withContext(Dispatchers.IO) {
                     val nanoJob = async { nanoLlm.prepare { msg -> scope.launch { appendLog(msg) } } }
+                    val ttsJob = async { ttsEngine.prepareGenAiVoices { msg -> scope.launch { appendLog(msg) } } }
                     pipeline.initModels(preferGpu = useGpu) { msg -> scope.launch { appendLog(msg) } }
                     nanoJob.await()
+                    ttsJob.await()
                 }
                 val bootSec = (System.nanoTime() - t0) / 1e9
-                appendLog("LiteRT 3-model stack + Nano warmed in ${"%.2f".format(bootSec)}s (${pipeline.activeAcceleratorLabel})")
-                nanoBadge = nanoLlm.statusLabel
+                appendLog("LiteRT 3-model stack + Nano + ${ttsEngine.statusLabel} ready in ${"%.2f".format(bootSec)}s (${pipeline.activeAcceleratorLabel})")
+                val nanoShort = if (nanoLlm.isReady) "Nano Ready" else nanoLlm.statusLabel
+                val ttsShort = if (ttsEngine.statusLabel.contains("GenAI")) "GenAI 24kHz" else "Neural TTS"
+                nanoBadge = "$nanoShort · $ttsShort"
+                voiceLabel = ttsEngine.shortVoiceName(activeAvatar)
 
                 statusBadge = "Benchmarking Tensor G5…"
                 val targetBmp = nextWorkBmp()
@@ -468,25 +479,42 @@ class MainActivity : ComponentActivity() {
 
         fun runThreeTurnDemo() {
             if (busy || !ready) return
+            val topic = demoTopic.trim().ifBlank { defaultDemoTopic }
+            val isScriptedShowcase = (topic == xShowcaseTopic)
             activeJob = uiScope.launch {
                 busy = true
                 try {
-                    chatHistory.add(ChatTurn("System", "3-Turn Demo: Puck & Gretchen — What they did last weekend"))
-                    val turns = listOf(
-                        "puck" to "Start a fun casual chat with Gretchen about what you did last weekend and ask what she did.",
-                        "gretchen" to "Respond naturally to Puck's weekend story, share one highlight from your own weekend, and ask Puck a quick follow-up.",
-                        "puck" to "Respond warmly and wittily to Gretchen's weekend story to wrap up this 3-turn chat.",
+                    chatHistory.add(
+                        ChatTurn(
+                            "System",
+                            if (isScriptedShowcase) "3-Turn X Showcase: Puck & Gretchen — LiteRT + Gemini Nano"
+                            else "3-Turn Demo: Puck & Gretchen — $topic",
+                        )
                     )
-                    // Pipelined lookahead: while Turn i is speaking, Turn i+1 runs Gemini Nano (TPU) + TTS (CPU)
-                    // in the background so the gap between speakers drops to ~0.3s!
+                    val scriptedLines = listOf(
+                        "puck" to "Hey everyone on X! I'm Puck, and right now you're watching me run one hundred percent offline on a Google Pixel 10 — zero cloud servers, zero Python, even in Airplane Mode. Gretchen, tell them how we pulled off forty frames a second right here on a phone!",
+                        "gretchen" to "Thanks, Puck! Every model in our stack was authored directly from safetensors in C++ using Google's LiteRT Tensor API, with zero unsupported GPU ops. We then distilled a 143-megabyte StyleGAN and Swin teacher down into a 6.7-megabyte mobile student running at 38 to 42 frames per second on Pixel 10's GPU — using under 850 megabytes of RAM!",
+                        "puck" to "And the exact same LiteRT pipeline also runs at over 54 frames per second in desktop Chrome WebGPU with Gemini Nano built right in! Check out the open-source Chrome Avatar repo on GitHub to run both yourself — and shout out to the LiteRT team!",
+                    )
+                    val turns = if (isScriptedShowcase) {
+                        scriptedLines
+                    } else {
+                        listOf(
+                            "puck" to "Start a fun casual chat with Gretchen about: $topic. Share one thought and ask Gretchen what she thinks.",
+                            "gretchen" to "Respond naturally to Puck about: $topic. Share your own take and ask Puck a quick follow-up.",
+                            "puck" to "Respond warmly and wittily to Gretchen to wrap up this 3-turn chat about: $topic.",
+                        )
+                    }
+                    // Pipelined lookahead: while Turn i is speaking, Turn i+1 prepares reply + TTS
+                    // in the background so the gap between speakers stays tiny!
                     var prefetched: Deferred<Triple<String, Double, TtsAudio>>? = null
 
                     for ((idx, pair) in turns.withIndex()) {
-                        val (speakerKey, cue) = pair
+                        val (speakerKey, cueOrScript) = pair
                         val name = pipeline.avatars[speakerKey]!!.displayName
                         selectAvatar(speakerKey)
                         val bubbleIdx = chatHistory.size
-                        chatHistory.add(ChatTurn("$name (${idx + 1}/3)", "Thinking…", speakerKey))
+                        chatHistory.add(ChatTurn("$name (${idx + 1}/3)", if (isScriptedShowcase) cueOrScript else "Thinking…", speakerKey))
                         runCatching { chatListState.animateScrollToItem(chatHistory.lastIndex) }
 
                         val reply: String
@@ -499,11 +527,13 @@ class MainActivity : ComponentActivity() {
                             statusBadge = "Turn ${idx + 1}/3 · Ready ($name)…"
                             val (r, ms, audio) = pf.await()
                             reply = r; llmMs = ms; preAudio = audio
+                        } else if (isScriptedShowcase) {
+                            reply = cueOrScript; llmMs = 0.0; preAudio = null
                         } else {
                             statusBadge = "Turn ${idx + 1}/3 · Nano ($name)…"
                             val pairRes = if (nanoLlm.isReady) {
                                 withContext(Dispatchers.IO) {
-                                    nanoLlm.replyAs(speakerKey, chatHistory.dropLast(1), cue) { partial ->
+                                    nanoLlm.replyAs(speakerKey, chatHistory.dropLast(1), cueOrScript) { partial ->
                                         uiScope.launch {
                                             if (bubbleIdx < chatHistory.size) {
                                                 chatHistory[bubbleIdx] = ChatTurn(name, "$partial▌", speakerKey)
@@ -521,16 +551,18 @@ class MainActivity : ComponentActivity() {
                             reply = pairRes.first; llmMs = pairRes.second; preAudio = null
                         }
 
-                        metricLlm = "${"%.0f".format(llmMs)} ms"
+                        metricLlm = if (isScriptedShowcase) "Script" else "${"%.0f".format(llmMs)} ms"
                         chatHistory[bubbleIdx] = ChatTurn(name, reply, speakerKey)
-                        appendLog("[Turn ${idx + 1}/3 · $name] (${"%.0f".format(llmMs)}ms): $reply")
+                        appendLog("[Turn ${idx + 1}/3 · $name] (${if (isScriptedShowcase) "script" else "${"%.0f".format(llmMs)}ms"}): $reply")
 
                         // Kick off next turn's Gemini Nano + TTS right now in parallel while this turn speaks!
                         if (idx + 1 < turns.size) {
                             val (nextKey, nextCue) = turns[idx + 1]
                             val historySnap = chatHistory.toList()
                             prefetched = uiScope.async(Dispatchers.IO) {
-                                val (nr, nms) = if (nanoLlm.isReady) {
+                                val (nr, nms) = if (isScriptedShowcase) {
+                                    nextCue to 0.0
+                                } else if (nanoLlm.isReady) {
                                     nanoLlm.replyAs(nextKey, historySnap, nextCue)
                                 } else {
                                     (if (idx + 1 == 1) "That sounds awesome! I baked fresh sourdough and read all afternoon. Where was that coffee shop?"
@@ -691,27 +723,60 @@ class MainActivity : ComponentActivity() {
                             disabledContainerColor = Color(0xFF1A202C),
                             disabledContentColor = Color(0xFF8B949E),
                         ),
-                        contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp),
+                        contentPadding = PaddingValues(horizontal = 10.dp, vertical = 6.dp),
                         modifier = Modifier.weight(1f).height(38.dp),
                     ) { Text("3-Turn Demo", fontSize = 12.sp, maxLines = 1, softWrap = false) }
+
+                    OutlinedButton(
+                        onClick = { showTopicDialog = true },
+                        enabled = !busy,
+                        contentPadding = PaddingValues(horizontal = 8.dp, vertical = 6.dp),
+                        modifier = Modifier.height(38.dp),
+                    ) {
+                        Text(
+                            "Topic",
+                            fontSize = 11.sp,
+                            maxLines = 1,
+                            softWrap = false,
+                            color = if (demoTopic != defaultDemoTopic) green else accent,
+                        )
+                    }
                 }
 
-                // Controls Row 2: Playback FPS Mode + Accelerator
+                // Controls Row 2: Voice Cycle + Playback FPS Mode + Log + Accelerator
                 Row(
                     modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                    horizontalArrangement = Arrangement.spacedBy(5.dp),
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
+                    OutlinedButton(
+                        onClick = {
+                            voiceLabel = ttsEngine.cycleVoice(activeAvatar)
+                            ttsEngine.previewCurrentVoice(activeAvatar)
+                        },
+                        enabled = ready && !busy,
+                        contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp),
+                        modifier = Modifier.weight(1.1f).height(34.dp),
+                    ) {
+                        Text(
+                            "Voice: $voiceLabel",
+                            fontSize = 11.sp,
+                            maxLines = 1,
+                            softWrap = false,
+                            color = green,
+                        )
+                    }
+
                     val modeText = when (playbackMode) {
-                        0 -> "Playback: 12.5 FPS Smooth"
-                        1 -> "Playback: 25 FPS Smooth"
-                        else -> "Playback: Live (Zero-Wait)"
+                        0 -> "12.5FPS"
+                        1 -> "25FPS"
+                        else -> "Live"
                     }
                     OutlinedButton(
                         onClick = { playbackMode = (playbackMode + 1) % 3 },
                         enabled = !busy,
-                        contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp),
-                        modifier = Modifier.weight(1f).height(34.dp),
+                        contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp),
+                        modifier = Modifier.height(34.dp),
                     ) {
                         Text(
                             modeText,
@@ -724,9 +789,9 @@ class MainActivity : ComponentActivity() {
 
                     OutlinedButton(
                         onClick = { showLog = !showLog },
-                        contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp),
+                        contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp),
                         modifier = Modifier.height(34.dp),
-                    ) { Text(if (showLog) "Hide Log" else "Log", fontSize = 11.sp, maxLines = 1, softWrap = false, color = Color(0xFF8B949E)) }
+                    ) { Text(if (showLog) "Hide" else "Log", fontSize = 11.sp, maxLines = 1, softWrap = false, color = Color(0xFF8B949E)) }
 
                     OutlinedButton(
                         onClick = {
@@ -736,7 +801,7 @@ class MainActivity : ComponentActivity() {
                             }
                         },
                         enabled = !busy,
-                        contentPadding = PaddingValues(horizontal = 12.dp, vertical = 4.dp),
+                        contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp),
                         modifier = Modifier.height(34.dp),
                     ) { Text(if (preferGpu) "GPU" else "CPU", fontSize = 11.sp, maxLines = 1, softWrap = false, color = accent) }
                 }
@@ -865,6 +930,79 @@ class MainActivity : ComponentActivity() {
                         ) { Text("Stop", fontSize = 12.sp) }
                     }
                 }
+            }
+
+            if (showTopicDialog) {
+                var draft by remember(demoTopic) { mutableStateOf(demoTopic) }
+                val presets = listOf(
+                    xShowcaseTopic,
+                    defaultDemoTopic,
+                    "Coffee vs tea — which is better?",
+                    "Favorite movie of all time",
+                    "Running AI 100% offline on Pixel 10",
+                )
+                AlertDialog(
+                    onDismissRequest = { showTopicDialog = false },
+                    containerColor = card,
+                    titleContentColor = Color.White,
+                    textContentColor = Color(0xFFC9D1D9),
+                    title = { Text("3-Turn Demo Topic", fontSize = 16.sp, fontWeight = FontWeight.Bold) },
+                    text = {
+                        Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                            OutlinedTextField(
+                                value = draft,
+                                onValueChange = { draft = it },
+                                label = { Text("Conversation prompt / topic", fontSize = 12.sp) },
+                                singleLine = false,
+                                maxLines = 3,
+                                modifier = Modifier.fillMaxWidth(),
+                                colors = OutlinedTextFieldDefaults.colors(
+                                    focusedTextColor = Color.White,
+                                    unfocusedTextColor = Color.White,
+                                    focusedBorderColor = accent,
+                                    unfocusedBorderColor = border,
+                                ),
+                            )
+                            Text("Quick Presets:", fontSize = 11.sp, color = Color(0xFF8B949E))
+                            for (p in presets) {
+                                Text(
+                                    text = "• $p",
+                                    color = if (draft == p) green else accent,
+                                    fontSize = 12.sp,
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .clip(RoundedCornerShape(6.dp))
+                                        .background(Color(0xFF1C2433))
+                                        .clickable { draft = p }
+                                        .padding(horizontal = 8.dp, vertical = 6.dp),
+                                )
+                            }
+                        }
+                    },
+                    confirmButton = {
+                        Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                            TextButton(onClick = {
+                                draft = defaultDemoTopic
+                                demoTopic = defaultDemoTopic
+                            }) { Text("Reset Default", color = Color(0xFFD29922), fontSize = 12.sp) }
+                            Button(
+                                onClick = {
+                                    demoTopic = draft.trim().ifBlank { defaultDemoTopic }
+                                    showTopicDialog = false
+                                    if (ready && !busy) runThreeTurnDemo()
+                                },
+                                colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF238636)),
+                                contentPadding = PaddingValues(horizontal = 10.dp, vertical = 6.dp),
+                            ) { Text("Save & Run", fontSize = 12.sp) }
+                        }
+                    },
+                    dismissButton = {
+                        TextButton(onClick = {
+                            demoTopic = draft.trim().ifBlank { defaultDemoTopic }
+                            showTopicDialog = false
+                        }) { Text("Save", color = accent, fontSize = 12.sp) }
+                    },
+                )
             }
         }
     }

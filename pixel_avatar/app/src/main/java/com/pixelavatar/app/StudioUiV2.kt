@@ -1,6 +1,11 @@
 package com.pixelavatar.app
 
 import android.graphics.Bitmap
+import androidx.compose.animation.CapturedAnimatedVisibility
+import androidx.compose.animation.expandVertically
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.shrinkVertically
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
@@ -13,13 +18,16 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
-import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.foundation.text.input.TextFieldLineLimits
+import androidx.compose.foundation.text.input.rememberTextFieldState
+import androidx.compose.foundation.text.input.setTextAndPlaceCursorAtEnd
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.blur
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
@@ -31,6 +39,8 @@ import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.StrokeJoin
 import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.graphics.blur.BlurRadiusSpec
+import androidx.compose.ui.graphics.blur.BlurStop
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.text.TextStyle
@@ -213,13 +223,43 @@ fun StudioUiV2(
                 val bmp = state.frameBmp
                 if (bmp != null) {
                     key(state.frameVersion) {
+                        // Compose 1.13 Progressive Blur: razor-sharp top 75% (face/eyes/mouth),
+                        // smoothly transitioning to 14.dp frosted glass behind the bottom speaker label!
                         Image(
                             bitmap = bmp.asImageBitmap(),
                             contentDescription = "Live 512x512 HD Avatar",
-                            modifier = Modifier.fillMaxSize(),
+                            modifier = Modifier
+                                .fillMaxSize()
+                                .blur {
+                                    blurRadiusSpec = BlurRadiusSpec.verticalGradient(
+                                        listOf(
+                                            BlurStop(0f, 0.dp),
+                                            BlurStop(0.76f, 0.dp),
+                                            BlurStop(1f, 14.dp),
+                                        )
+                                    )
+                                },
                             contentScale = ContentScale.Crop,
                         )
                     }
+                }
+
+                // Compose 1.13 CapturedAnimatedVisibility + M3 1.5 Expressive Wavy indicator while preparing
+                val isPreparing = !state.ready || (state.busy && !state.statusBadge.startsWith("Speaking"))
+                CapturedAnimatedVisibility(
+                    visible = isPreparing,
+                    enter = fadeIn(),
+                    exit = fadeOut(),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .align(Alignment.TopCenter)
+                        .padding(horizontal = 16.dp, vertical = 10.dp),
+                ) {
+                    LinearWavyProgressIndicator(
+                        color = primaryBlue,
+                        trackColor = Color(0x440D1117),
+                        modifier = Modifier.fillMaxWidth(),
+                    )
                 }
 
                 // Subtle top scrim for depth
@@ -381,8 +421,12 @@ fun StudioUiV2(
                 }
             }
 
-            // 3b. Active Study Quiz Progress Strip (progressive disclosure — hidden when not quizzing!)
-            if (state.quiz.active) {
+            // 3b. Active Study Quiz Progress Strip (Compose 1.13 CapturedAnimatedVisibility + M3 1.5 LinearWavyProgressIndicator!)
+            CapturedAnimatedVisibility(
+                visible = state.quiz.active,
+                enter = fadeIn() + expandVertically(),
+                exit = fadeOut() + shrinkVertically(),
+            ) {
                 val progress = if (state.quiz.totalCards > 0) {
                     (state.quiz.masteredCount.toFloat() / state.quiz.totalCards.toFloat()).coerceIn(0f, 1f)
                 } else 0f
@@ -392,7 +436,7 @@ fun StudioUiV2(
                         .clip(RoundedCornerShape(16.dp))
                         .background(surfaceElevated)
                         .padding(horizontal = 14.dp, vertical = 10.dp),
-                    verticalArrangement = Arrangement.spacedBy(7.dp),
+                    verticalArrangement = Arrangement.spacedBy(8.dp),
                 ) {
                     Row(
                         modifier = Modifier.fillMaxWidth(),
@@ -434,22 +478,13 @@ fun StudioUiV2(
                             )
                         }
                     }
-                    // Slim modern progress bar
-                    Box(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .height(4.dp)
-                            .clip(RoundedCornerShape(999.dp))
-                            .background(surfaceHigher),
-                    ) {
-                        Box(
-                            modifier = Modifier
-                                .fillMaxWidth(progress.coerceAtLeast(0.04f))
-                                .fillMaxHeight()
-                                .clip(RoundedCornerShape(999.dp))
-                                .background(emerald),
-                        )
-                    }
+                    // Material 3 1.5.0 Stable Expressive Wavy Progress Indicator
+                    LinearWavyProgressIndicator(
+                        progress = { progress.coerceAtLeast(0.05f) },
+                        color = emerald,
+                        trackColor = surfaceHigher,
+                        modifier = Modifier.fillMaxWidth(),
+                    )
                 }
             }
 
@@ -549,7 +584,18 @@ fun StudioUiV2(
                 }
             }
 
-            // 5. Unified Pill-Shaped Composer Bar (TextField + Mic Icon + Send Icon inside one sleek pill)
+            // 5. Unified Pill-Shaped Composer Bar (Compose 1.13 state-based BasicTextField + Mic + Send)
+            val composerState = rememberTextFieldState(initialText = state.inputText)
+            LaunchedEffect(state.inputText) {
+                if (composerState.text.toString() != state.inputText) {
+                    composerState.setTextAndPlaceCursorAtEnd(state.inputText)
+                }
+            }
+            LaunchedEffect(composerState) {
+                snapshotFlow { composerState.text.toString() }.collect { txt ->
+                    if (txt != state.inputText) onInputChange(txt)
+                }
+            }
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -564,7 +610,7 @@ fun StudioUiV2(
                     modifier = Modifier.weight(1f),
                     contentAlignment = Alignment.CenterStart,
                 ) {
-                    if (state.inputText.isEmpty()) {
+                    if (composerState.text.isEmpty()) {
                         Text(
                             text = if (state.quiz.active && state.quiz.awaitingAnswer) "Speak or type your answer…"
                             else "Ask Puck or Gretchen…",
@@ -574,9 +620,8 @@ fun StudioUiV2(
                         )
                     }
                     BasicTextField(
-                        value = state.inputText,
-                        onValueChange = onInputChange,
-                        singleLine = true,
+                        state = composerState,
+                        lineLimits = TextFieldLineLimits.SingleLine,
                         textStyle = TextStyle(
                             color = textPrimary,
                             fontSize = 14.sp,
@@ -584,13 +629,12 @@ fun StudioUiV2(
                         ),
                         cursorBrush = SolidColor(primaryBlue),
                         keyboardOptions = KeyboardOptions(imeAction = ImeAction.Send),
-                        keyboardActions = KeyboardActions(
-                            onSend = {
-                                if (state.ready && !state.busy && state.inputText.isNotBlank()) {
-                                    onSendQuestion(state.inputText)
-                                }
+                        onKeyboardAction = {
+                            val txt = composerState.text.toString()
+                            if (state.ready && !state.busy && txt.isNotBlank()) {
+                                onSendQuestion(txt)
                             }
-                        ),
+                        },
                         modifier = Modifier.fillMaxWidth(),
                     )
                 }
@@ -749,7 +793,8 @@ fun StudioUiV2(
     // Progressive Disclosure Sheet 2: Studio Settings (Topic, Voices, Mode, GPU, UI Switch)
     // =========================================================================
     if (showSettingsSheet) {
-        var draftTopic by remember(state.demoTopic) { mutableStateOf(state.demoTopic) }
+        val draftTopicState = rememberTextFieldState(initialText = state.demoTopic)
+        val draftTopic = draftTopicState.text.toString()
         val presets = listOf(
             state.xShowcaseTopic,
             state.defaultDemoTopic,
@@ -1011,7 +1056,7 @@ fun StudioUiV2(
                             fontSize = 11.sp,
                             fontWeight = FontWeight.Medium,
                             modifier = Modifier.clickable {
-                                draftTopic = state.defaultDemoTopic
+                                draftTopicState.setTextAndPlaceCursorAtEnd(state.defaultDemoTopic)
                                 onDemoTopicSave(state.defaultDemoTopic, false)
                             },
                         )
@@ -1025,11 +1070,10 @@ fun StudioUiV2(
                             .padding(horizontal = 14.dp, vertical = 12.dp),
                     ) {
                         BasicTextField(
-                            value = draftTopic,
-                            onValueChange = { draftTopic = it },
+                            state = draftTopicState,
                             textStyle = TextStyle(color = textPrimary, fontSize = 13.sp, lineHeight = 18.sp),
                             cursorBrush = SolidColor(primaryBlue),
-                            maxLines = 3,
+                            lineLimits = TextFieldLineLimits.MultiLine(maxHeightInLines = 3),
                             modifier = Modifier.fillMaxWidth(),
                         )
                     }
@@ -1041,7 +1085,7 @@ fun StudioUiV2(
                                 .fillMaxWidth()
                                 .clip(RoundedCornerShape(12.dp))
                                 .background(if (selected) surfaceActive else bgCanvas)
-                                .clickable { draftTopic = preset }
+                                .clickable { draftTopicState.setTextAndPlaceCursorAtEnd(preset) }
                                 .padding(horizontal = 12.dp, vertical = 10.dp),
                             horizontalArrangement = Arrangement.SpaceBetween,
                             verticalAlignment = Alignment.CenterVertically,

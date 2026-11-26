@@ -239,6 +239,9 @@ class MainActivity : ComponentActivity() {
         var playbackMode by remember { mutableIntStateOf(2) }
         var activeAvatar by remember { mutableStateOf("puck") }
         var voiceLabel by remember { mutableStateOf("tpd") }
+        var puckVoiceShort by remember { mutableStateOf("tpd") }
+        var gretchenVoiceShort by remember { mutableStateOf("iog") }
+        var useStudioUi by remember { mutableStateOf(true) }
         val defaultDemoTopic = "What you did last weekend"
         val xShowcaseTopic = "★ X Demo Script (LiteRT Showcase)"
         var demoTopic by remember { mutableStateOf(defaultDemoTopic) }
@@ -371,6 +374,8 @@ class MainActivity : ComponentActivity() {
                 val nanoShort = if (nanoLlm.isReady) "Nano Ready" else nanoLlm.statusLabel
                 val ttsShort = if (ttsEngine.statusLabel.contains("GenAI")) "GenAI 24kHz" else "Neural TTS"
                 nanoBadge = "$nanoShort · $ttsShort"
+                puckVoiceShort = ttsEngine.shortVoiceName("puck")
+                gretchenVoiceShort = ttsEngine.shortVoiceName("gretchen")
                 voiceLabel = ttsEngine.shortVoiceName(activeAvatar)
 
                 statusBadge = "Benchmarking Tensor G5…"
@@ -780,6 +785,72 @@ class MainActivity : ComponentActivity() {
         val accent = Color(0xFF58A6FF)
         val green = Color(0xFF3FB950)
 
+        if (useStudioUi) {
+            StudioUiV2(
+                state = StudioUiState(
+                    ready = ready,
+                    busy = busy,
+                    preferGpu = preferGpu,
+                    playbackMode = playbackMode,
+                    activeAvatar = activeAvatar,
+                    puckVoiceShort = puckVoiceShort,
+                    gretchenVoiceShort = gretchenVoiceShort,
+                    demoTopic = demoTopic,
+                    defaultDemoTopic = defaultDemoTopic,
+                    xShowcaseTopic = xShowcaseTopic,
+                    statusBadge = statusBadge,
+                    nanoReady = nanoLlm.isReady,
+                    nanoBadge = nanoBadge,
+                    inputText = inputText,
+                    logText = logText,
+                    memMain = memMain,
+                    memSub = memSub,
+                    metricLlm = metricLlm,
+                    metricTts = metricTts,
+                    metricMotion = metricMotion,
+                    metricRend = metricRend,
+                    renderSide = pipeline.renderSide,
+                    acceleratorLabel = pipeline.activeAcceleratorLabel,
+                    frameBmp = frameBmp,
+                    frameVersion = frameVersion,
+                    chatHistory = chatHistory,
+                    chatListState = chatListState,
+                ),
+                onSelectAvatar = { selectAvatar(it) },
+                onRunThreeTurnDemo = { runThreeTurnDemo() },
+                onStop = { stopActivePlayback() },
+                onInputChange = { inputText = it },
+                onSendQuestion = { sendQuestion(it) },
+                onMicClick = {
+                    val intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
+                        putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
+                        putExtra(RecognizerIntent.EXTRA_PROMPT, "Ask Puck or Gretchen…")
+                    }
+                    runCatching { voiceLauncher.launch(intent) }
+                },
+                onCycleVoice = { avatarKey ->
+                    val short = ttsEngine.cycleVoice(avatarKey)
+                    if (avatarKey == "gretchen") gretchenVoiceShort = short else puckVoiceShort = short
+                    if (avatarKey == activeAvatar) voiceLabel = short
+                    ttsEngine.previewCurrentVoice(avatarKey)
+                },
+                onPlaybackModeChange = { playbackMode = it },
+                onPreferGpuChange = { gpu ->
+                    if (!busy) {
+                        preferGpu = gpu
+                        uiScope.launch { bootPipeline(gpu) }
+                    }
+                },
+                onDemoTopicSave = { newTopic, runNow ->
+                    demoTopic = newTopic
+                    if (runNow && ready && !busy) runThreeTurnDemo()
+                },
+                onRefreshMem = { refreshMem() },
+                onSwitchToClassic = { useStudioUi = false },
+            )
+            return
+        }
+
         Surface(modifier = Modifier.fillMaxSize(), color = bg) {
             Column(
                 modifier = Modifier
@@ -789,14 +860,30 @@ class MainActivity : ComponentActivity() {
                     .padding(12.dp),
                 verticalArrangement = Arrangement.spacedBy(8.dp),
             ) {
-                // Header + Live Memory HUD
+                // Header + Live Memory HUD (Classic Console v1 + 1-tap switch back to Studio v2)
                 Row(
                     modifier = Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.SpaceBetween,
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
                     Column(modifier = Modifier.weight(1f)) {
-                        Text("Pixel Avatar", color = accent, fontSize = 19.sp, fontWeight = FontWeight.Bold)
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        ) {
+                            Text("Pixel Avatar", color = accent, fontSize = 19.sp, fontWeight = FontWeight.Bold)
+                            Text(
+                                text = "Studio UI",
+                                color = Color.White,
+                                fontSize = 10.sp,
+                                fontWeight = FontWeight.SemiBold,
+                                modifier = Modifier
+                                    .clip(RoundedCornerShape(999.dp))
+                                    .background(Color(0xFF1F6FEB))
+                                    .clickable { useStudioUi = true }
+                                    .padding(horizontal = 8.dp, vertical = 3.dp),
+                            )
+                        }
                         Text(nanoBadge, color = if (nanoLlm.isReady) green else Color(0xFFD29922), fontSize = 11.sp, fontFamily = FontFamily.Monospace)
                     }
                     Column(
@@ -921,6 +1008,7 @@ class MainActivity : ComponentActivity() {
                     OutlinedButton(
                         onClick = {
                             voiceLabel = ttsEngine.cycleVoice(activeAvatar)
+                            if (activeAvatar == "gretchen") gretchenVoiceShort = voiceLabel else puckVoiceShort = voiceLabel
                             ttsEngine.previewCurrentVoice(activeAvatar)
                         },
                         enabled = ready && !busy,

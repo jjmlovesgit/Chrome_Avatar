@@ -2,8 +2,10 @@ package com.pixelavatar.app
 
 import com.google.mlkit.genai.common.DownloadStatus
 import com.google.mlkit.genai.common.FeatureStatus
+import com.google.mlkit.genai.prompt.GenerateContentRequest
 import com.google.mlkit.genai.prompt.Generation
 import com.google.mlkit.genai.prompt.GenerativeModel
+import com.google.mlkit.genai.prompt.TextPart
 
 data class ChatTurn(
     val speaker: String, // "You", "Puck", "Gretchen", or "System"
@@ -24,8 +26,12 @@ class NanoLlmClient {
             when (val st = model.checkStatus()) {
                 FeatureStatus.AVAILABLE -> {
                     isReady = true
+                    statusLabel = "Warming Nano…"
+                    val t0 = System.nanoTime()
+                    runCatching { model.warmup() }
+                    val wMs = (System.nanoTime() - t0) / 1e6
                     statusLabel = "Gemini Nano Ready"
-                    onStatus("AICore Gemini Nano: AVAILABLE (on-device Tensor G5)")
+                    onStatus("AICore Gemini Nano: AVAILABLE & warmed on Tensor G5 (${"%.0f".format(wMs)} ms)")
                     true
                 }
                 FeatureStatus.DOWNLOADABLE, FeatureStatus.DOWNLOADING -> {
@@ -40,12 +46,13 @@ class NanoLlmClient {
                             }
                             is DownloadStatus.DownloadCompleted -> {
                                 isReady = true
+                                runCatching { model.warmup() }
                                 statusLabel = "Gemini Nano Ready"
-                                onStatus("AICore Gemini Nano download complete!")
+                                onStatus("AICore Gemini Nano download complete & warmed!")
                             }
                             is DownloadStatus.DownloadFailed -> {
                                 statusLabel = "Nano Download Failed"
-                                onStatus("Gemini Nano download failed: ${dl.e.message}")
+                                onStatus("AICore Gemini Nano download failed: ${dl.e.message}")
                             }
                         }
                     }
@@ -66,44 +73,77 @@ class NanoLlmClient {
         }
     }
 
-    suspend fun replyAs(
-        avatarKey: String,
-        history: List<ChatTurn>,
-        promptText: String,
-    ): Pair<String, Double> {
-        val personaName = if (avatarKey == "gretchen") "Gretchen" else "Puck"
-        val personaDesc = if (avatarKey == "gretchen") {
-            "You are Gretchen, an articulate, friendly, thoughtful AI companion sharing a room with Puck."
-        } else {
-            "You are Puck, a warm, witty, sharp AI companion sharing a room with Gretchen."
-        }
-
-        val recent = history.filter { it.speaker != "System" }.takeLast(8)
-        val sb = StringBuilder()
-        sb.append(personaDesc).append('\n')
-        sb.append("Reply naturally in 1 to 2 concise spoken sentences as $personaName only. ")
-        sb.append("Never repeat what someone else just said, never write any speaker name prefix or colon, and never use markdown or emojis.\n")
-        if (recent.isNotEmpty()) {
-            sb.append("\nContext from earlier in the room (for reference only — do NOT repeat or quote it):\n")
-            for (m in recent) {
-                sb.append("(${m.speaker} said) ${m.text}\n")
-            }
-        }
-        sb.append("\nNow respond in 1 to 2 spoken sentences as $personaName:\n")
-        sb.append(promptText)
-
-        val t0 = System.nanoTime()
-        val resp = model.generateContent(sb.toString())
-        val ms = (System.nanoTime() - t0) / 1e6
-
-        var reply = (resp.candidates.firstOrNull()?.text ?: "").replace(Regex("[*_`#]"), "").trim()
+    private fun cleanReply(raw: String, personaName: String): String {
+        var reply = raw.replace(Regex("[*_`#]"), "").trim()
         val ownTag = Regex("(?:^|\\n)\\s*(?:\\[?$personaName\\]?)\\s*:\\s*([\\s\\S]+)$", RegexOption.IGNORE_CASE)
-        ownTag.find(reply)?.groupValues?.getOrNull(1)?.trim()?.takeIf { it.length > 10 }?.let { reply = it }
+        ownTag.find(reply)?.groupValues?.getOrNull(1)?.trim()?.takeIf { it.length > 8 }?.let { reply = it }
         reply = reply
             .replace(Regex("^\\s*\\[[^\\]]{1,24}]\\s*:?\\s*"), "")
             .replace(Regex("^\\s*(?:Puck|Gretchen)\\s*:\\s*", RegexOption.IGNORE_CASE), "")
             .trim()
-        if (reply.isEmpty()) reply = "Hey there! It is great chatting with you right here on your Pixel 10."
+        return reply
+    }
+
+    suspend fun replyAs(
+        avatarKey: String,
+        history: List<ChatTurn>,
+        promptText: String,
+        onPartial: ((String) -> Unit)? = null,
+    ): Pair<String, Double> {
+        val personaName = if (avatarKey == "gretchen") "Gretchen" else "Puck"
+        val personaDesc = if (avatarKey == "gretchen") {
+            "You are Gretchen, a friendly, sharp AI companion with Puck."
+        } else {
+            "You are Puck, a warm, witty AI companion with Gretchen."
+        }
+
+        // Ultra-compact prompt (<=4 recent turns) minimizes prefill latency on Tensor G5!
+        val recent = history.filter { it.speaker != "System" }.takeLast(4)
+        val sb = StringBuilder()
+        sb.append(personaDesc)
+        sb.append(" Reply in 1-2 short spoken sentences (under 25 words), no speaker labels or markdown.\n")
+        if (recent.isNotEmpty()) {
+            for (m in recent) {
+                sb.append(m.speaker).append(": ").append(m.text).append('\n')
+            }
+        }
+        sb.append("Task: ").append(promptText).append('\n')
+        sb.append(personaName).append(':')
+
+        val request = GenerateContentRequest.Builder(TextPart(sb.toString())).apply {
+            temperature = 0.7f
+            topK = 32
+            candidateCount = 1
+            maxOutputTokens = 56
+            enableThinking = false
+        }.build()
+
+        val t0 = System.nanoTime()
+        val acc = StringBuilder()
+        if (onPartial != null) {
+            try {
+                model.generateContentStream(request).collect { chunk ->
+                    val piece = chunk.candidates.firstOrNull()?.text ?: ""
+                    if (piece.isNotEmpty()) {
+                        acc.append(piece)
+                        val cleaned = cleanReply(acc.toString(), personaName)
+                        if (cleaned.isNotEmpty()) onPartial(cleaned)
+                    }
+                }
+            } catch (_: Throwable) {
+                // Fallback to non-streaming if stream fails
+                val resp = model.generateContent(request)
+                acc.clear()
+                acc.append(resp.candidates.firstOrNull()?.text ?: "")
+            }
+        } else {
+            val resp = model.generateContent(request)
+            acc.append(resp.candidates.firstOrNull()?.text ?: "")
+        }
+        val ms = (System.nanoTime() - t0) / 1e6
+
+        var reply = cleanReply(acc.toString(), personaName)
+        if (reply.isEmpty()) reply = "Hey there! Great chatting with you offline on Pixel 10."
         return reply to ms
     }
 

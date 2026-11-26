@@ -213,16 +213,15 @@ class MainActivity : ComponentActivity() {
                 selectAvatar(activeAvatar)
                 downloadMissingModels()
 
-                statusBadge = "Compiling LiteRT (${if (useGpu) "GPU" else "CPU"})…"
+                statusBadge = "Compiling LiteRT + Warming Nano…"
                 val t0 = System.nanoTime()
                 withContext(Dispatchers.IO) {
+                    val nanoJob = async { nanoLlm.prepare { msg -> scope.launch { appendLog(msg) } } }
                     pipeline.initModels(preferGpu = useGpu) { msg -> scope.launch { appendLog(msg) } }
+                    nanoJob.await()
                 }
                 val bootSec = (System.nanoTime() - t0) / 1e9
-                appendLog("LiteRT 3-model stack compiled in ${"%.2f".format(bootSec)}s (${pipeline.activeAcceleratorLabel})")
-
-                statusBadge = "Checking Gemini Nano…"
-                nanoLlm.prepare { msg -> appendLog(msg) }
+                appendLog("LiteRT 3-model stack + Nano warmed in ${"%.2f".format(bootSec)}s (${pipeline.activeAcceleratorLabel})")
                 nanoBadge = nanoLlm.statusLabel
 
                 statusBadge = "Benchmarking Tensor G5…"
@@ -231,8 +230,7 @@ class MainActivity : ComponentActivity() {
                     val av = pipeline.avatars[activeAvatar]!!
                     pipeline.runBenchmark(av, targetBmp, nFrames = 6)
                 }
-                frameBmp = targetBmp
-                frameVersion++
+                selectAvatar(activeAvatar)
                 metricMotion = "${"%.0f".format(bench.w2vMs + bench.fmMs)} ms"
                 metricRend = "${"%.1f".format(bench.rendMs)} ms (${"%.1f".format(bench.fps)} FPS)"
                 appendLog(
@@ -250,11 +248,15 @@ class MainActivity : ComponentActivity() {
             }
         }
 
-        suspend fun speakReply(avatarKey: String, replyText: String) {
+        suspend fun speakReply(avatarKey: String, replyText: String, preSynthAudio: TtsAudio? = null) {
             val avatar = pipeline.avatars[avatarKey] ?: return
             selectAvatar(avatarKey)
-            statusBadge = "TTS (${avatar.displayName})…"
-            val ttsAudio = withContext(Dispatchers.IO) { ttsEngine.synthesize(replyText, avatarKey) }
+            val ttsAudio = if (preSynthAudio != null) {
+                preSynthAudio
+            } else {
+                statusBadge = "TTS (${avatar.displayName})…"
+                withContext(Dispatchers.IO) { ttsEngine.synthesize(replyText, avatarKey) }
+            }
             metricTts = "${"%.0f".format(ttsAudio.synthMs)} ms"
             appendLog("TTS (${avatar.displayName}): ${"%.0f".format(ttsAudio.synthMs)} ms (${"%.2f".format(ttsAudio.durationSec)}s)")
 
@@ -317,22 +319,31 @@ class MainActivity : ComponentActivity() {
                 }
 
                 statusBadge = "Speaking (${avatar.displayName} · $fpsLabel)"
+                var audioDone = false
                 val mp = MediaPlayer().apply {
                     setDataSource(ttsAudio.wavFile.absolutePath)
+                    setOnCompletionListener { audioDone = true }
                     prepare()
                 }
                 mediaPlayer = mp
-                val startNs = System.nanoTime()
                 mp.start()
+
+                // Wait for Android AudioFlinger to begin outputting samples so lips never lead audio
+                val waitStart = System.nanoTime()
+                while (currentCoroutineContext().isActive && !audioDone && mp.currentPosition <= 0 &&
+                    (System.nanoTime() - waitStart) < 500_000_000L
+                ) {
+                    delay(8)
+                }
 
                 var shown = 0
                 var lastK = -1
-                while (currentCoroutineContext().isActive) {
-                    val elapsedSec = (System.nanoTime() - startNs) / 1e9
-                    val k = (elapsedSec * targetFps).toInt()
+                while (currentCoroutineContext().isActive && !audioDone) {
+                    val posMs = runCatching { mp.currentPosition }.getOrDefault(0)
+                    val k = ((posMs / 1000.0) * targetFps).toInt()
                     if (k >= nOut) break
                     if (k == lastK) {
-                        delay(10)
+                        delay(8)
                         continue
                     }
                     val bmp = renderedFrames[k]
@@ -342,10 +353,10 @@ class MainActivity : ComponentActivity() {
                         frameVersion++
                         shown++
                     } else {
-                        delay(12)
+                        delay(10)
                     }
                 }
-                while (mp.isPlaying && currentCoroutineContext().isActive) delay(25)
+                while (!audioDone && runCatching { mp.isPlaying }.getOrDefault(false) && currentCoroutineContext().isActive) delay(20)
                 renderJob.cancel()
                 runCatching { mp.release() }
                 mediaPlayer = null
@@ -356,25 +367,34 @@ class MainActivity : ComponentActivity() {
                 statusBadge = "Ready · $fpsLabel Smooth"
                 refreshMem()
             } else {
-                // Zero-wait Live mode
+                // Zero-wait Live mode locked directly to hardware MediaPlayer audio clock
                 statusBadge = "Speaking (${avatar.displayName})"
+                var audioDone = false
                 val mp = MediaPlayer().apply {
                     setDataSource(ttsAudio.wavFile.absolutePath)
+                    setOnCompletionListener { audioDone = true }
                     prepare()
                 }
                 mediaPlayer = mp
-                val startNs = System.nanoTime()
                 mp.start()
+
+                // Wait until Android audio hardware actually starts outputting PCM samples
+                val waitStart = System.nanoTime()
+                while (currentCoroutineContext().isActive && !audioDone && mp.currentPosition <= 0 &&
+                    (System.nanoTime() - waitStart) < 500_000_000L
+                ) {
+                    delay(8)
+                }
 
                 var rendered = 0
                 var sumRendMs = 0.0
                 var lastIdx = -1
-                while (currentCoroutineContext().isActive) {
-                    val elapsedSec = (System.nanoTime() - startNs) / 1e9
-                    val idx = (elapsedSec * 25.0).toInt()
+                while (currentCoroutineContext().isActive && !audioDone) {
+                    val posMs = runCatching { mp.currentPosition }.getOrDefault(0)
+                    val idx = ((posMs / 1000.0) * 25.0).toInt()
                     if (idx >= totalFrames) break
                     if (idx == lastIdx) {
-                        delay(8)
+                        delay(6)
                         continue
                     }
                     lastIdx = idx
@@ -388,7 +408,7 @@ class MainActivity : ComponentActivity() {
                     val avgR = sumRendMs / rendered
                     metricRend = "${"%.1f".format(avgR)} ms (${"%.1f".format(1000.0 / avgR)} FPS)"
                 }
-                while (mp.isPlaying && currentCoroutineContext().isActive) delay(30)
+                while (!audioDone && runCatching { mp.isPlaying }.getOrDefault(false) && currentCoroutineContext().isActive) delay(20)
                 runCatching { mp.release() }
                 mediaPlayer = null
                 ttsAudio.wavFile.delete()
@@ -418,7 +438,15 @@ class MainActivity : ComponentActivity() {
 
                     statusBadge = "Gemini Nano ($name)…"
                     val (reply, llmMs) = if (nanoLlm.isReady) {
-                        withContext(Dispatchers.IO) { nanoLlm.replyAs(target, chatHistory.dropLast(1), trimmed) }
+                        withContext(Dispatchers.IO) {
+                            nanoLlm.replyAs(target, chatHistory.dropLast(1), trimmed) { partial ->
+                                uiScope.launch {
+                                    if (thinkingIdx < chatHistory.size) {
+                                        chatHistory[thinkingIdx] = ChatTurn(name, "$partial▌", target)
+                                    }
+                                }
+                            }
+                        }
                     } else {
                         "Hi! I am $name running 100 percent offline on your Pixel 10 Tensor G5 right now." to 1.0
                     }
@@ -449,6 +477,10 @@ class MainActivity : ComponentActivity() {
                         "gretchen" to "Respond naturally to Puck's weekend story, share one highlight from your own weekend, and ask Puck a quick follow-up.",
                         "puck" to "Respond warmly and wittily to Gretchen's weekend story to wrap up this 3-turn chat.",
                     )
+                    // Pipelined lookahead: while Turn i is speaking, Turn i+1 runs Gemini Nano (TPU) + TTS (CPU)
+                    // in the background so the gap between speakers drops to ~0.3s!
+                    var prefetched: Deferred<Triple<String, Double, TtsAudio>>? = null
+
                     for ((idx, pair) in turns.withIndex()) {
                         val (speakerKey, cue) = pair
                         val name = pipeline.avatars[speakerKey]!!.displayName
@@ -457,21 +489,60 @@ class MainActivity : ComponentActivity() {
                         chatHistory.add(ChatTurn("$name (${idx + 1}/3)", "Thinking…", speakerKey))
                         runCatching { chatListState.animateScrollToItem(chatHistory.lastIndex) }
 
-                        statusBadge = "Turn ${idx + 1}/3 · Nano ($name)…"
-                        val (reply, llmMs) = if (nanoLlm.isReady) {
-                            withContext(Dispatchers.IO) { nanoLlm.replyAs(speakerKey, chatHistory.dropLast(1), cue) }
+                        val reply: String
+                        val llmMs: Double
+                        val preAudio: TtsAudio?
+
+                        val pf = prefetched
+                        prefetched = null
+                        if (pf != null) {
+                            statusBadge = "Turn ${idx + 1}/3 · Ready ($name)…"
+                            val (r, ms, audio) = pf.await()
+                            reply = r; llmMs = ms; preAudio = audio
                         } else {
-                            when (idx) {
-                                0 -> "I spent last weekend hiking a forest trail and hunting down the best espresso in town. What did you get up to, Gretchen?"
-                                1 -> "That sounds awesome, Puck! I reorganized my bookshelf and baked sourdough all Sunday afternoon. Did you find a good coffee spot?"
-                                else -> "Found a tiny roaster tucked behind the bookstore — next weekend we should grab espresso and bring your sourdough!"
-                            } to 1.0
+                            statusBadge = "Turn ${idx + 1}/3 · Nano ($name)…"
+                            val pairRes = if (nanoLlm.isReady) {
+                                withContext(Dispatchers.IO) {
+                                    nanoLlm.replyAs(speakerKey, chatHistory.dropLast(1), cue) { partial ->
+                                        uiScope.launch {
+                                            if (bubbleIdx < chatHistory.size) {
+                                                chatHistory[bubbleIdx] = ChatTurn(name, "$partial▌", speakerKey)
+                                            }
+                                        }
+                                    }
+                                }
+                            } else {
+                                when (idx) {
+                                    0 -> "I hiked a misty trail and found an amazing espresso spot. What did you do, Gretchen?"
+                                    1 -> "That sounds awesome! I baked fresh sourdough and read all afternoon. Where was that coffee shop?"
+                                    else -> "Right behind the bookstore — next weekend let's grab espresso and bring your sourdough!"
+                                } to 1.0
+                            }
+                            reply = pairRes.first; llmMs = pairRes.second; preAudio = null
                         }
+
                         metricLlm = "${"%.0f".format(llmMs)} ms"
                         chatHistory[bubbleIdx] = ChatTurn(name, reply, speakerKey)
                         appendLog("[Turn ${idx + 1}/3 · $name] (${"%.0f".format(llmMs)}ms): $reply")
-                        speakReply(speakerKey, reply)
-                        delay(250)
+
+                        // Kick off next turn's Gemini Nano + TTS right now in parallel while this turn speaks!
+                        if (idx + 1 < turns.size) {
+                            val (nextKey, nextCue) = turns[idx + 1]
+                            val historySnap = chatHistory.toList()
+                            prefetched = uiScope.async(Dispatchers.IO) {
+                                val (nr, nms) = if (nanoLlm.isReady) {
+                                    nanoLlm.replyAs(nextKey, historySnap, nextCue)
+                                } else {
+                                    (if (idx + 1 == 1) "That sounds awesome! I baked fresh sourdough and read all afternoon. Where was that coffee shop?"
+                                    else "Right behind the bookstore — next weekend let's grab espresso and bring your sourdough!") to 1.0
+                                }
+                                val na = ttsEngine.synthesize(nr, nextKey)
+                                Triple(nr, nms, na)
+                            }
+                        }
+
+                        speakReply(speakerKey, reply, preSynthAudio = preAudio)
+                        delay(120)
                     }
                     chatHistory.add(ChatTurn("System", "3-turn demo complete — ask Puck or Gretchen anything!"))
                 } catch (_: CancellationException) {

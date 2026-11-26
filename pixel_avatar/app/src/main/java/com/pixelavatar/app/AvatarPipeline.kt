@@ -25,6 +25,7 @@ data class AvatarCache(
     val tR: FloatArray,
     val featureBuffers: List<FloatArray>, // exact order matching renderer_decode inputs [1..11]
     val portrait: Bitmap,
+    val portrait256Rgb: FloatArray,       // [256 * 256 * 3] NHWC float in [0, 1] for 2-input mobile student
 )
 
 data class PrevState(
@@ -49,7 +50,8 @@ class AvatarPipeline(private val context: Context) {
     companion object {
         const val MODEL_W2V = "wav2vec2_2s_fp16w.tflite"
         const val MODEL_FM = "fm_step_fp16w.tflite"
-        const val MODEL_REND = "renderer_decode_hd_fast.tflite"
+        const val MODEL_REND = "student_renderer_256_fp16w.tflite"
+        private const val MODEL_REND_HD = "renderer_decode_hd_fast.tflite"
         private const val MODEL_REND_LEGACY = "renderer_decode_fp16w.tflite"
 
         const val RELEASE_BASE = "https://github.com/jjmlovesgit/Chrome_Avatar/releases/download/v1.0.0"
@@ -98,11 +100,11 @@ class AvatarPipeline(private val context: Context) {
 
     fun resolveRendererFile(): File {
         val dir = modelsDir()
-        val primary = File(dir, MODEL_REND)
-        if (primary.exists() && primary.length() >= 10_000_000L) return primary
-        val legacy = File(dir, MODEL_REND_LEGACY)
-        if (legacy.exists() && legacy.length() >= 10_000_000L) return legacy
-        return primary
+        for (name in listOf(MODEL_REND, MODEL_REND_HD, MODEL_REND_LEGACY)) {
+            val f = File(dir, name)
+            if (f.exists() && f.length() >= 1_000_000L) return f
+        }
+        return File(dir, MODEL_REND)
     }
 
     fun missingModels(): List<String> {
@@ -113,7 +115,7 @@ class AvatarPipeline(private val context: Context) {
             if (!f.exists() || f.length() < 10_000_000L) missing.add(name)
         }
         val rend = resolveRendererFile()
-        if (!rend.exists() || rend.length() < 10_000_000L) missing.add(MODEL_REND)
+        if (!rend.exists() || rend.length() < 1_000_000L) missing.add(MODEL_REND)
         return missing
     }
 
@@ -131,7 +133,19 @@ class AvatarPipeline(private val context: Context) {
         val bmp = context.assets.open("$base/portrait.png").use { BitmapFactory.decodeStream(it) }
         val scaled = if (bmp.width == 512 && bmp.height == 512) bmp
         else Bitmap.createScaledBitmap(bmp, 512, 512, true)
-        return AvatarCache(key, displayName, tR, feats, scaled)
+        val bmp256 = Bitmap.createScaledBitmap(scaled, 256, 256, true)
+        val px = IntArray(256 * 256)
+        bmp256.getPixels(px, 0, 256, 0, 0, 256, 256)
+        bmp256.recycle()
+        val rgb256 = FloatArray(256 * 256 * 3)
+        for (i in px.indices) {
+            val c = px[i]
+            val b = i * 3
+            rgb256[b] = ((c shr 16) and 0xFF) / 255f
+            rgb256[b + 1] = ((c shr 8) and 0xFF) / 255f
+            rgb256[b + 2] = (c and 0xFF) / 255f
+        }
+        return AvatarCache(key, displayName, tR, feats, scaled, rgb256)
     }
 
     private fun readAssetFloats(assetPath: String): FloatArray {
@@ -208,9 +222,10 @@ class AvatarPipeline(private val context: Context) {
         // Lock directly to Pixel 10's fastest proven backend: WGPU-FP16 (Vulkan) -> CL-FP16-TEX -> CPU
         val rendFile = resolveRendererFile()
         val rendName = rendFile.name
+        val rendCacheTag = "${rendFile.length()}_${rendFile.lastModified()}"
         if (preferGpu) {
-            val wgpuOpts = makeGpuOpts(CompiledModel.GpuOptions.Backend.WEBGPU, CompiledModel.GpuOptions.BufferStorageType.DEFAULT, false, "rend_wgpu_fp16")
-            val clTexOpts = makeGpuOpts(CompiledModel.GpuOptions.Backend.OPENCL, CompiledModel.GpuOptions.BufferStorageType.TEXTURE_2D, true, "rend_cl_tex_fp16")
+            val wgpuOpts = makeGpuOpts(CompiledModel.GpuOptions.Backend.WEBGPU, CompiledModel.GpuOptions.BufferStorageType.DEFAULT, false, "rend_wgpu_$rendCacheTag")
+            val clTexOpts = makeGpuOpts(CompiledModel.GpuOptions.Backend.OPENCL, CompiledModel.GpuOptions.BufferStorageType.TEXTURE_2D, true, "rend_cltex_$rendCacheTag")
             val rendPath = rendFile.absolutePath
             var compiled: Pair<CompiledModel, String>? = null
             for ((label, opts) in listOf("WGPU-FP16" to wgpuOpts, "CL-FP16-TEX" to clTexOpts)) {
@@ -248,9 +263,14 @@ class AvatarPipeline(private val context: Context) {
 
     fun bindAvatarToRenderer(avatar: AvatarCache) {
         if (boundAvatarKey == avatar.key) return
-        // rendIn[0] is t_c [1, 32]; rendIn[1..11] are static face cache tensors
-        for (i in avatar.featureBuffers.indices) {
-            rendIn[i + 1].writeFloat(avatar.featureBuffers[i])
+        if (rendIn.size == 2) {
+            // Lightweight 2-input mobile student renderer: [t_c, src_img]
+            rendIn[1].writeFloat(avatar.portrait256Rgb)
+        } else {
+            // Full 12-input IMTalker teacher renderer: [t_c, i_r, ma_r_0..3, f_r_0..5]
+            for (i in avatar.featureBuffers.indices) {
+                rendIn[i + 1].writeFloat(avatar.featureBuffers[i])
+            }
         }
         boundAvatarKey = avatar.key
     }
@@ -407,14 +427,15 @@ class AvatarPipeline(private val context: Context) {
     }
 
     fun runBenchmark(avatar: AvatarCache, outBitmap: Bitmap, nFrames: Int = 10): BenchResult {
-        val w2v = runWav2VecChunk(FloatArray(32000), buildCalmPose(0))
+        // Use a realistic quiet speech-level test waveform (avoiding all-zero LayerNorm degeneracy in FP16)
+        val dummyPcm = FloatArray(32000) { i -> (0.02 * sin(2.0 * PI * 220.0 * i / 16000.0)).toFloat() }
+        val w2v = runWav2VecChunk(dummyPcm, buildCalmPose(0))
         val fm = runFmChunk(w2v.aNow, w2v.poseEmb, avatar.tR, PrevState(), chunkIdx = 0)
-        // Warmup 1 frame
+        // Warmup + benchmark on valid neutral/speech tokens
         renderFrame(avatar, avatar.tR, outBitmap)
         var sumR = 0.0
         for (f in 0 until nFrames) {
-            val tok = fm.tokens.copyOfRange(f * 32, (f + 1) * 32)
-            sumR += renderFrame(avatar, tok, outBitmap)
+            sumR += renderFrame(avatar, avatar.tR, outBitmap)
         }
         val avgR = sumR / nFrames
         return BenchResult(

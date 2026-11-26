@@ -2,7 +2,7 @@
 
 Real-time **512×512 conversational talking-head avatars** (**Puck** & **Gretchen**) powered by **one single C++ LiteRT Tensor API pipeline** running **100% locally** in two form factors:
 1. **Desktop Chrome WebGPU Studio (`web/`):** **Chrome Built-in Gemini Nano** (or in-browser **WebLLM**) + warm Windows SAPI neural voices (`0 GB` VRAM) + **LiteRT.js (`@litertjs/core`) WebGPU** — **`44.5–54.6 FPS`** live with **`0.00 GB` VRAM drift**.
-2. **Native Android / Google Pixel 10 Studio (`pixel_avatar/`):** **100% offline** Kotlin + Jetpack Compose app using **LiteRT `2.3.0` (`WGPU-FP16`)** + **Pixel 10 AICore Gemini Nano** (`genai-prompt`) + **offline Android Neural TTS** — **`2.67 s` cold boot**, **`4.75 FPS`** (`210.6 ms`) sharp 512×512 (`38.15 dB`) zero-wait live talking heads (`3.6×` faster than mobile Chrome WebGPU).
+2. **Native Android / Google Pixel 10 Studio (`pixel_avatar/`):** **100% offline** Kotlin + Jetpack Compose app using **LiteRT `2.3.0` (`WGPU-FP16`)** + **Pixel 10 AICore Gemini Nano** (`genai-prompt` with parallel warmup, streaming, and pipelined `0.2 s` turn handoffs) + **offline Android Neural TTS** + our **distilled `6.74 MB` FiLM Mobile U-Net Student (`21×` smaller than teacher!)** — **`33–42 FPS` (`23–30 ms/frame`)** real-time talking heads (`25×–32×` faster than mobile Chrome WebGPU!), **`~850 MB` App RAM**, **`0 s` turn buffering**, hardware-clock audio-locked lip-sync.
 
 No Python inference server. No PyTorch runtime. No cloud LLM APIs. Built natively on Windows (VS 2022 MSVC + CMake, zero WSL).
 
@@ -72,15 +72,18 @@ Measured live via Windows GPU Process Memory (`Win32_PerfFormattedData_GPUPerfor
 
 ### Native Google Pixel 10 (`Tensor G5`, Android 17) Benchmarks — 100% Offline
 
-| Pixel 10 Build (`512×512` Live) | Quality vs. PyTorch | `wav2vec2` + `fm_step` | Renderer (`512×512`) | **Raw GPU FPS** | App RAM (PSS) |
+| Pixel 10 Build | Model Size | Unseen Quality | Renderer Latency | **Raw GPU FPS** | App RAM (PSS) |
 | --- | --- | --- | --- | --- | --- |
-| Chrome 149 Mobile WebGPU (`fp16w`) | `63.6 dB` | `470 + 985 ms` | `752.1 ms` | `1.33 FPS` | Browser |
-| Native LiteRT `2.3.0` default GPU (`fp16w`) | `63.6 dB` | `113 + 155 ms` | `357.0 ms` | `2.80 FPS` | `2,136 MB` |
-| **Native LiteRT `2.3.0` `WGPU-FP16` (`hd_fast`)** | **`38.15 dB` (sharp)** | **`124 + 187 ms`** | **`210.6 ms`** | **`4.75 FPS` (`3.6×` Chrome)** | **`1,877 MB`** |
+| Chrome 149 Mobile WebGPU (`fp16w`) | `143.1 MB` | `63.6 dB` | `752.1 ms` | `1.33 FPS` | Browser |
+| Native LiteRT `2.3.0` Teacher (`fp16w`) | `143.1 MB` | `63.6 dB` | `357.0 ms` | `2.80 FPS` | `2,136 MB` |
+| Native LiteRT `WGPU-FP16` (`hd_fast`) | `131.6 MB` | `38.2 dB` | `210.6 ms` | `4.75 FPS` | `1,877 MB` |
+| **Distilled FiLM Mobile Student (`256×256`)** | **`6.74 MB` (`21×` smaller!)** | **`36.64 dB` (`MouthMAE 2.75/255`)** | **`23–30 ms`** | **`33–42 FPS` (`25×–32×` Chrome!)** | **`~850 MB`** |
 
-- **Cold boot (all 3 models resident):** **`2.67 s`** (`WGPU-FP16` Vulkan shader cache)
-- **On-device LLM:** **AICore Gemini Nano** (`com.google.mlkit:genai-prompt:1.0.0-beta5`) — **`~1.3 s` / reply**, 100% offline
-- **On-device Voice:** Android Neural `TextToSpeech.synthesizeToFile()` — **`~207 ms`** to 16 kHz PCM, 100% offline
+- **Cold boot (all 3 models resident + Nano warmed):** **`~2.1–4.4 s`** (student compiles in `61–153 ms` on `WGPU-FP16`)
+- **On-device LLM:** **AICore Gemini Nano** (`genai-prompt:1.0.0-beta5`, parallel `warmup()`, `enableThinking=false`, live streaming, pipelined `0.2 s` turn lookahead in 3-Turn Demo) — **`~550–860 ms` / reply**, 100% offline
+- **On-device Voice & Sync:** Offline Android Neural `TextToSpeech.synthesizeToFile()` + hardware `MediaPlayer.currentPosition` audio-locked lip-sync (**25 FPS realtime**, `0 s` buffering)
+
+![Teacher (143 MB) vs. Distilled Mobile Student (6.74 MB) on Unseen Speech](docs/val_teacher_vs_student.png)
 
 ---
 
@@ -95,10 +98,13 @@ Chrome_Avatar/
 ├── CMakeLists.txt               # Portable CMake target definitions for LiteRT Tensor API
 ├── fm_step_export.cc            # C++ LiteRT exporter: Flow Matching DiT -> fm_step_fp16w.tflite
 ├── renderer_decode_export.cc    # C++ LiteRT exporter: StyleGAN + Swin + IMT -> fp16w / hd_fast .tflite
+├── student_renderer_export.cc   # C++ LiteRT exporter: Distilled 6.74 MB FiLM U-Net -> student_renderer_256_fp16w.tflite
+├── distill_mobile_renderer.py   # RTX 5090 PyTorch distillation script (7,240 teacher frames -> 36.64 dB student)
 ├── wav2vec2_export.cc           # C++ LiteRT exporter: Wav2Vec2 + projections -> wav2vec2_2s_fp16w.tflite
 ├── docs/
-│   ├── studio_screenshot.png    # Live verified Chrome WebGPU Studio screenshot
-│   └── pixel10_screenshot.png   # Live verified Pixel 10 Tensor G5 native app screenshot
+│   ├── studio_screenshot.png        # Live verified Chrome WebGPU Studio screenshot
+│   ├── pixel10_screenshot.png       # Live verified Pixel 10 Tensor G5 native app (38.1 FPS, 850 MB RAM)
+│   └── val_teacher_vs_student.png   # Unseen-speech quality parity: 143 MB Teacher vs. 6.74 MB Student
 ├── avatars/
 │   ├── blink_delta.bin          # [9, 32] speaking blink delta tokens
 │   ├── puck/                    # Precomputed 9.17 MB NHWC face cache + 512x512 portrait
@@ -185,10 +191,10 @@ Open a **normal (non-Incognito) Google Chrome** window *(use Google Chrome rathe
 
 1. Open **`Chrome_Avatar/pixel_avatar`** in **Android Studio** (uses JDK 21 / Android Studio JBR, Gradle 8.13, Kotlin 2.4.0, `compileSdk = 36`, `minSdk = 28`).
 2. Connect your **Google Pixel 10** (or any arm64 Android device with USB Debugging enabled) and click **Run ▶**.
-3. **First launch:** The app automatically downloads the 3 FP16-weight `.tflite` models (`wav2vec2_2s_fp16w.tflite`, `fm_step_fp16w.tflite`, and mobile-optimized `renderer_decode_hd_fast.tflite` — `386 MB` total) from [Release `v1.0.0`](https://github.com/jjmlovesgit/Chrome_Avatar/releases/tag/v1.0.0) into app-private storage, compiles them on **LiteRT `2.3.0` (`WGPU-FP16`)**, and verifies **AICore Gemini Nano**.
-4. **After first launch:** Unplug USB and turn on Airplane Mode — **Pixel Avatar** (Gretchen's circular icon in your app drawer) runs **100% offline**!
-   - Tap **Puck** / **Gretchen** or **3-Turn Demo** to watch live banter, or tap **Mic** / type to ask anything.
-   - Tap **Playback: Live (Zero-Wait)** to switch between instant zero-wait live rendering (`4.75 FPS`), **12.5 FPS Smooth**, or **25 FPS Smooth**.
+3. **First launch:** The app automatically downloads the 3 FP16-weight `.tflite` models (`wav2vec2_2s_fp16w.tflite`, `fm_step_fp16w.tflite`, and our distilled **`student_renderer_256_fp16w.tflite`** `6.74 MB` — `261 MB` total) from [Release `v1.0.0`](https://github.com/jjmlovesgit/Chrome_Avatar/releases/tag/v1.0.0) into app-private storage, compiles them on **LiteRT `2.3.0` (`WGPU-FP16`)**, and warms up **AICore Gemini Nano** in parallel.
+4. **After first launch:** Unplug USB and turn on Airplane Mode — **Pixel Avatar** (Gretchen's circular icon in your app drawer) runs **100% offline** at **33–42 FPS**!
+   - Tap **Puck** / **Gretchen** or **3-Turn Demo** to watch pipelined `0.2 s`-handoff live banter, or tap **Mic** / type to ask anything.
+   - Lip-sync locks directly to the hardware `MediaPlayer` audio clock in **`Playback: Live (Zero-Wait)`** mode (full 25 FPS synced with zero buffering).
    - To mirror your Pixel 10 screen on your PC inside Android Studio, open **View → Tool Windows → Running Devices**.
 
 ---

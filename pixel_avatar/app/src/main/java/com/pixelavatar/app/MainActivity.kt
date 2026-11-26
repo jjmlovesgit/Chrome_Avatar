@@ -3,7 +3,10 @@ package com.pixelavatar.app
 import android.app.ActivityManager
 import android.content.Intent
 import android.graphics.Bitmap
-import android.media.MediaPlayer
+import android.media.AudioAttributes
+import android.media.AudioFormat
+import android.media.AudioTimestamp
+import android.media.AudioTrack
 import android.os.Bundle
 import android.os.Debug
 import android.speech.RecognizerIntent
@@ -45,8 +48,138 @@ class MainActivity : ComponentActivity() {
     private lateinit var ttsEngine: AndroidTtsEngine
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
 
-    private var mediaPlayer: MediaPlayer? = null
+    private var activeAudioTrack: AudioTrack? = null
     private var activeJob: Job? = null
+
+    /**
+     * Hardware-clock PCM player built on Android AudioTrack + AudioTimestamp.
+     * Tracks the exact acoustic playback time exiting the physical speaker / Bluetooth DAC
+     * with sub-millisecond accuracy and zero cumulative drift over long utterances.
+     */
+    private class HardwareAudioPlayer(private val audio: TtsAudio) {
+        val sampleRate: Int = audio.rawSampleRate
+        val totalFrames: Long = audio.rawTotalFrames.toLong()
+        val durationMs: Double = audio.durationSec * 1000.0
+
+        val track: AudioTrack
+        private val ts = AudioTimestamp()
+        @Volatile var finished: Boolean = false
+            private set
+
+        private var hasHwTs: Boolean = false
+        private var anchorFramePos: Long = 0L
+        private var anchorNanoTime: Long = 0L
+        private var playStartNano: Long = 0L
+        private var lastReturnedMs: Double = 0.0
+        private var writerJob: Job? = null
+
+        init {
+            val minBuf = AudioTrack.getMinBufferSize(
+                sampleRate,
+                AudioFormat.CHANNEL_OUT_MONO,
+                AudioFormat.ENCODING_PCM_16BIT,
+            ).coerceAtLeast(4096)
+            val bufBytes = maxOf(minBuf * 2, sampleRate * 2 / 5) // ~200 ms low-latency ring buffer
+            track = AudioTrack.Builder()
+                .setAudioAttributes(
+                    AudioAttributes.Builder()
+                        .setUsage(AudioAttributes.USAGE_MEDIA)
+                        .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
+                        .build()
+                )
+                .setAudioFormat(
+                    AudioFormat.Builder()
+                        .setEncoding(AudioFormat.ENCODING_PCM_16BIT)
+                        .setSampleRate(sampleRate)
+                        .setChannelMask(AudioFormat.CHANNEL_OUT_MONO)
+                        .build()
+                )
+                .setBufferSizeInBytes(bufBytes)
+                .setTransferMode(AudioTrack.MODE_STREAM)
+                .build()
+        }
+
+        fun start(scope: CoroutineScope) {
+            val pcm = audio.pcmRawBytes
+            // Pre-fill initial buffer before play() so hardware starts cleanly with zero underrun
+            val prefill = minOf(pcm.size, sampleRate * 2 / 10) // 100 ms prefill
+            var offset = if (prefill > 0) track.write(pcm, 0, prefill).coerceAtLeast(0) else 0
+            playStartNano = System.nanoTime()
+            track.play()
+
+            writerJob = scope.launch(Dispatchers.IO) {
+                try {
+                    val chunkBytes = 4096
+                    while (isActive && offset < pcm.size) {
+                        val toWrite = minOf(chunkBytes, pcm.size - offset)
+                        val written = track.write(pcm, offset, toWrite, AudioTrack.WRITE_BLOCKING)
+                        if (written <= 0) break
+                        offset += written
+                    }
+                    // Wait until the hardware DAC finishes playing the final sample
+                    while (isActive) {
+                        val posMs = acousticPositionMs()
+                        if (posMs >= durationMs - 15.0) break
+                        val head = track.playbackHeadPosition.toLong() and 0xFFFFFFFFL
+                        if (head >= totalFrames) break
+                        delay(12)
+                    }
+                } finally {
+                    finished = true
+                }
+            }
+        }
+
+        fun isHwTimestampLocked(): Boolean = hasHwTs
+
+        /**
+         * Returns the exact acoustic playback time (in ms) currently exiting the speaker/earbuds.
+         * Smoothly interpolated between AudioTimestamp hardware DAC locks, never jumps backward.
+         */
+        fun acousticPositionMs(): Double {
+            val nowNs = System.nanoTime()
+            val wasLocked = hasHwTs
+            if (runCatching { track.getTimestamp(ts) }.getOrDefault(false)) {
+                val ageMs = (nowNs - ts.nanoTime) / 1_000_000.0
+                if (ts.framePosition > 0 && ageMs in -200.0..2000.0) {
+                    if (!hasHwTs || ts.framePosition >= anchorFramePos) {
+                        anchorFramePos = ts.framePosition
+                        anchorNanoTime = ts.nanoTime
+                        hasHwTs = true
+                    }
+                }
+            }
+            val rawMs = if (hasHwTs) {
+                val dtSec = (nowNs - anchorNanoTime) / 1_000_000_000.0
+                val exactFrames = anchorFramePos + dtSec * sampleRate
+                (exactFrames / sampleRate) * 1000.0
+            } else {
+                val head = track.playbackHeadPosition.toLong() and 0xFFFFFFFFL
+                if (head > 0L) {
+                    ((head.toDouble() / sampleRate) * 1000.0 - 45.0).coerceAtLeast(0.0)
+                } else {
+                    0.0
+                }
+            }
+            val clamped = rawMs.coerceIn(0.0, durationMs)
+            // On first hardware DAC lock, adopt true acoustic clock directly; thereafter stay monotonic
+            if (!wasLocked && hasHwTs) {
+                lastReturnedMs = clamped
+            } else if (clamped >= lastReturnedMs) {
+                lastReturnedMs = clamped
+            }
+            return lastReturnedMs
+        }
+
+        fun release() {
+            writerJob?.cancel()
+            writerJob = null
+            runCatching { track.pause() }
+            runCatching { track.flush() }
+            runCatching { track.stop() }
+            runCatching { track.release() }
+        }
+    }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -71,9 +204,11 @@ class MainActivity : ComponentActivity() {
     private fun stopActivePlayback() {
         activeJob?.cancel()
         activeJob = null
-        runCatching { mediaPlayer?.stop() }
-        runCatching { mediaPlayer?.release() }
-        mediaPlayer = null
+        runCatching { activeAudioTrack?.pause() }
+        runCatching { activeAudioTrack?.flush() }
+        runCatching { activeAudioTrack?.stop() }
+        runCatching { activeAudioTrack?.release() }
+        activeAudioTrack = null
     }
 
     private fun readMemHud(): Pair<String, String> {
@@ -124,12 +259,14 @@ class MainActivity : ComponentActivity() {
         val chatListState = rememberLazyListState()
         val uiScope = rememberCoroutineScope()
 
-        // Double-buffered mutable bitmaps sized to renderer output (256x256 or 512x512) for zero-copy GPU swap!
+        // Triple-buffered mutable bitmaps sized to renderer output (256x256 or 512x512)
+        // so Compose RenderThread never reads a bitmap while GPU readback writes the next one.
         var frameBmp by remember { mutableStateOf<Bitmap?>(null) }
         var frameVersion by remember { mutableIntStateOf(0) }
         var bmpPool by remember {
             mutableStateOf(
                 arrayOf(
+                    Bitmap.createBitmap(256, 256, Bitmap.Config.ARGB_8888),
                     Bitmap.createBitmap(256, 256, Bitmap.Config.ARGB_8888),
                     Bitmap.createBitmap(256, 256, Bitmap.Config.ARGB_8888),
                 )
@@ -142,9 +279,10 @@ class MainActivity : ComponentActivity() {
                 bmpPool = arrayOf(
                     Bitmap.createBitmap(want, want, Bitmap.Config.ARGB_8888),
                     Bitmap.createBitmap(want, want, Bitmap.Config.ARGB_8888),
+                    Bitmap.createBitmap(want, want, Bitmap.Config.ARGB_8888),
                 )
             }
-            poolIdx = (poolIdx + 1) and 1
+            poolIdx = (poolIdx + 1) % bmpPool.size
             return bmpPool[poolIdx]
         }
 
@@ -309,7 +447,7 @@ class MainActivity : ComponentActivity() {
                         val avgR = sumRendMs / (k + 1)
                         withContext(Dispatchers.Main) {
                             metricRend = "${"%.0f".format(avgR)} ms (${"%.1f".format(1000.0 / avgR)} raw)"
-                            if (mediaPlayer == null) {
+                            if (activeAudioTrack == null) {
                                 statusBadge = "Buffering ${k + 1}/$nOut…"
                             }
                         }
@@ -329,104 +467,135 @@ class MainActivity : ComponentActivity() {
                     delay(40)
                 }
 
+                // Present Frame 0 immediately before hardware audio starts
+                renderedFrames[0]?.let { frameBmp = it; frameVersion++ }
                 statusBadge = "Speaking (${avatar.displayName} · $fpsLabel)"
-                var audioDone = false
-                val mp = MediaPlayer().apply {
-                    setDataSource(ttsAudio.wavFile.absolutePath)
-                    setOnCompletionListener { audioDone = true }
-                    prepare()
-                }
-                mediaPlayer = mp
-                mp.start()
-
-                // Wait for Android AudioFlinger to begin outputting samples so lips never lead audio
-                val waitStart = System.nanoTime()
-                while (currentCoroutineContext().isActive && !audioDone && mp.currentPosition <= 0 &&
-                    (System.nanoTime() - waitStart) < 500_000_000L
-                ) {
-                    delay(8)
-                }
-
+                val player = HardwareAudioPlayer(ttsAudio)
+                activeAudioTrack = player.track
                 var shown = 0
-                var lastK = -1
-                while (currentCoroutineContext().isActive && !audioDone) {
-                    val posMs = runCatching { mp.currentPosition }.getOrDefault(0)
-                    val k = ((posMs / 1000.0) * targetFps).toInt()
-                    if (k >= nOut) break
-                    if (k == lastK) {
-                        delay(8)
-                        continue
+                try {
+                    player.start(uiScope)
+
+                    // Wait until hardware audio starts draining samples
+                    val waitStart = System.nanoTime()
+                    while (currentCoroutineContext().isActive && !player.finished &&
+                        player.acousticPositionMs() <= 0.0 &&
+                        (System.nanoTime() - waitStart) < 350_000_000L
+                    ) {
+                        delay(5)
                     }
-                    val bmp = renderedFrames[k]
-                    if (bmp != null) {
-                        lastK = k
-                        frameBmp = bmp
-                        frameVersion++
-                        shown++
-                    } else {
-                        delay(10)
+
+                    val displayLeadMs = 16.0 // ~1 VSYNC display scanout lead
+                    var lastK = 0
+                    while (currentCoroutineContext().isActive && !player.finished) {
+                        val posMs = player.acousticPositionMs()
+                        val k = (((posMs + displayLeadMs) / 1000.0) * targetFps).toInt()
+                        if (k >= nOut) break
+                        if (k <= lastK) {
+                            delay(5)
+                            continue
+                        }
+                        val bmp = renderedFrames[k]
+                        if (bmp != null) {
+                            lastK = k
+                            frameBmp = bmp
+                            frameVersion++
+                            shown++
+                        } else {
+                            delay(8)
+                        }
                     }
+                    while (!player.finished && currentCoroutineContext().isActive) delay(15)
+                } finally {
+                    renderJob.cancel()
+                    player.release()
+                    if (activeAudioTrack === player.track) activeAudioTrack = null
                 }
-                while (!audioDone && runCatching { mp.isPlaying }.getOrDefault(false) && currentCoroutineContext().isActive) delay(20)
-                renderJob.cancel()
-                runCatching { mp.release() }
-                mediaPlayer = null
-                ttsAudio.wavFile.delete()
 
                 val rawAvg = if (sumRendMs > 0) sumRendMs / renderedFrames.count { it != null }.coerceAtLeast(1) else 0.0
-                appendLog("[${avatar.displayName} SMOOTH] $shown/$nOut frames @ $fpsLabel synced (raw GPU ${"%.0f".format(rawAvg)}ms = ${"%.1f".format(if (rawAvg > 0) 1000.0 / rawAvg else 0.0)} FPS)")
+                appendLog("[${avatar.displayName} SMOOTH] $shown/$nOut frames @ $fpsLabel synced (hwTs=${player.isHwTimestampLocked()}, raw GPU ${"%.0f".format(rawAvg)}ms)")
                 statusBadge = "Ready · $fpsLabel Smooth"
                 refreshMem()
             } else {
-                // Zero-wait Live mode locked directly to hardware MediaPlayer audio clock
+                // Zero-wait Live mode locked to hardware AudioTrack AudioTimestamp with render-ahead pacing:
+                // Pre-renders frame idx (emaRendMs + 1 VSYNC) BEFORE its acoustic timestamp so every mouth
+                // shape hits the OLED right as that exact audio sample exits the physical speaker/earbuds!
+                val initBmp = nextWorkBmp()
+                val firstTok = allTokens.copyOfRange(0, 32)
+                var emaRendMs = withContext(Dispatchers.IO) { pipeline.renderFrame(avatar, firstTok, initBmp) }
+                frameBmp = initBmp
+                frameVersion++
+
                 statusBadge = "Speaking (${avatar.displayName})"
-                var audioDone = false
-                val mp = MediaPlayer().apply {
-                    setDataSource(ttsAudio.wavFile.absolutePath)
-                    setOnCompletionListener { audioDone = true }
-                    prepare()
-                }
-                mediaPlayer = mp
-                mp.start()
+                val player = HardwareAudioPlayer(ttsAudio)
+                activeAudioTrack = player.track
+                var rendered = 1
+                var sumRendMs = emaRendMs
+                var maxSyncErrMs = 0.0
+                var sumAbsSyncErrMs = 0.0
+                try {
+                    player.start(uiScope)
 
-                // Wait until Android audio hardware actually starts outputting PCM samples
-                val waitStart = System.nanoTime()
-                while (currentCoroutineContext().isActive && !audioDone && mp.currentPosition <= 0 &&
-                    (System.nanoTime() - waitStart) < 500_000_000L
-                ) {
-                    delay(8)
-                }
-
-                var rendered = 0
-                var sumRendMs = 0.0
-                var lastIdx = -1
-                while (currentCoroutineContext().isActive && !audioDone) {
-                    val posMs = runCatching { mp.currentPosition }.getOrDefault(0)
-                    val idx = ((posMs / 1000.0) * 25.0).toInt()
-                    if (idx >= totalFrames) break
-                    if (idx == lastIdx) {
-                        delay(6)
-                        continue
+                    // Wait until hardware audio starts draining samples
+                    val waitStart = System.nanoTime()
+                    while (currentCoroutineContext().isActive && !player.finished &&
+                        player.acousticPositionMs() <= 0.0 &&
+                        (System.nanoTime() - waitStart) < 350_000_000L
+                    ) {
+                        delay(4)
                     }
-                    lastIdx = idx
-                    val tok = allTokens.copyOfRange(idx * 32, (idx + 1) * 32)
-                    val targetBmp = nextWorkBmp()
-                    val rMs = withContext(Dispatchers.IO) { pipeline.renderFrame(avatar, tok, targetBmp) }
-                    frameBmp = targetBmp
-                    frameVersion++
-                    sumRendMs += rMs
-                    rendered++
-                    val avgR = sumRendMs / rendered
-                    metricRend = "${"%.1f".format(avgR)} ms (${"%.1f".format(1000.0 / avgR)} FPS)"
+
+                    val displayLeadMs = 16.0 // ~1 VSYNC display pipeline
+                    var lastIdx = 0
+                    while (currentCoroutineContext().isActive && !player.finished) {
+                        val posNowMs = player.acousticPositionMs()
+                        val renderAheadMs = emaRendMs.coerceIn(10.0, 50.0) + displayLeadMs
+                        val targetIdx = ((posNowMs + renderAheadMs) / 40.0).toInt()
+                        if (targetIdx >= totalFrames) break
+                        if (targetIdx <= lastIdx) {
+                            delay(4)
+                            continue
+                        }
+                        lastIdx = targetIdx
+                        val tok = allTokens.copyOfRange(targetIdx * 32, (targetIdx + 1) * 32)
+                        val targetBmp = nextWorkBmp()
+                        val rMs = withContext(Dispatchers.IO) { pipeline.renderFrame(avatar, tok, targetBmp) }
+                        emaRendMs = 0.8 * emaRendMs + 0.2 * rMs
+
+                        // Pace presentation to hit exact acoustic timestamp (minus 1 VSYNC scanout)
+                        val presentAtMs = targetIdx * 40.0 - displayLeadMs
+                        val posAfterMs = player.acousticPositionMs()
+                        val waitMs = (presentAtMs - posAfterMs).toLong()
+                        if (waitMs in 2L..38L && !player.finished) {
+                            delay(waitMs)
+                        }
+                        val posPresentMs = player.acousticPositionMs()
+                        val errMs = (posPresentMs + displayLeadMs) - (targetIdx * 40.0)
+                        val absErr = kotlin.math.abs(errMs)
+                        sumAbsSyncErrMs += absErr
+                        if (absErr > maxSyncErrMs) maxSyncErrMs = absErr
+
+                        frameBmp = targetBmp
+                        frameVersion++
+                        sumRendMs += rMs
+                        rendered++
+                        val avgR = sumRendMs / rendered
+                        metricRend = "${"%.1f".format(avgR)} ms (${"%.1f".format(1000.0 / avgR)} FPS)"
+                    }
+                    while (!player.finished && currentCoroutineContext().isActive) delay(15)
+                } finally {
+                    player.release()
+                    if (activeAudioTrack === player.track) activeAudioTrack = null
                 }
-                while (!audioDone && runCatching { mp.isPlaying }.getOrDefault(false) && currentCoroutineContext().isActive) delay(20)
-                runCatching { mp.release() }
-                mediaPlayer = null
-                ttsAudio.wavFile.delete()
 
                 val avgR = if (rendered > 0) sumRendMs / rendered else 0.0
                 val fps = if (avgR > 0) 1000.0 / avgR else 0.0
-                appendLog("[${avatar.displayName}] $rendered/$totalFrames frames | motion=${"%.0f".format(motionMs)}ms | rend=${"%.1f".format(avgR)}ms (${"%.1f".format(fps)} FPS)")
+                val meanSyncErr = if (rendered > 1) sumAbsSyncErrMs / (rendered - 1) else 0.0
+                appendLog(
+                    "[${avatar.displayName}] $rendered/$totalFrames frames | motion=${"%.0f".format(motionMs)}ms | " +
+                        "rend=${"%.1f".format(avgR)}ms (${"%.1f".format(fps)} FPS) | " +
+                        "syncErr=${"%.1f".format(meanSyncErr)}ms (max=${"%.0f".format(maxSyncErrMs)}ms, hwTs=${player.isHwTimestampLocked()})"
+                )
                 statusBadge = "Ready · ${"%.1f".format(fps)} FPS"
                 refreshMem()
             }

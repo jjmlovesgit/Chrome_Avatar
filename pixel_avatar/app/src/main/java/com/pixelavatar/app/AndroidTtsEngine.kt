@@ -23,6 +23,9 @@ data class TtsAudio(
     val pcm16k: FloatArray,
     val durationSec: Double,
     val synthMs: Double,
+    val pcmRawBytes: ByteArray,
+    val rawSampleRate: Int,
+    val rawTotalFrames: Int,
 )
 
 class AndroidTtsEngine(private val context: Context) {
@@ -290,11 +293,28 @@ class AndroidTtsEngine(private val context: Context) {
         val synthMs = (System.nanoTime() - t0) / 1e6
         require(finished && outFile.exists() && outFile.length() > 44) { "TTS synthesis failed" }
 
-        val (pcm16k, durationSec) = decodeWavTo16kMono(outFile)
-        return TtsAudio(outFile, pcm16k, durationSec, synthMs)
+        val decoded = decodeWavTo16kMono(outFile)
+        outFile.delete()
+        return TtsAudio(
+            wavFile = outFile,
+            pcm16k = decoded.pcm16k,
+            durationSec = decoded.durationSec,
+            synthMs = synthMs,
+            pcmRawBytes = decoded.pcmRawBytes,
+            rawSampleRate = decoded.rawSampleRate,
+            rawTotalFrames = decoded.rawTotalFrames,
+        )
     }
 
-    private fun decodeWavTo16kMono(file: File): Pair<FloatArray, Double> {
+    private data class DecodedWav(
+        val pcm16k: FloatArray,
+        val durationSec: Double,
+        val pcmRawBytes: ByteArray,
+        val rawSampleRate: Int,
+        val rawTotalFrames: Int,
+    )
+
+    private fun decodeWavTo16kMono(file: File): DecodedWav {
         val bytes = file.readBytes()
         val bb = ByteBuffer.wrap(bytes).order(ByteOrder.LITTLE_ENDIAN)
         var pos = 12
@@ -322,6 +342,8 @@ class AndroidTtsEngine(private val context: Context) {
         val bytesPerSample = (bitsPerSample / 8).coerceAtLeast(2)
         val totalFrames = dataSize / (channels * bytesPerSample)
         val mono = FloatArray(totalFrames)
+        val monoPcm16Bytes = ByteArray(totalFrames * 2)
+        val outBb = ByteBuffer.wrap(monoPcm16Bytes).order(ByteOrder.LITTLE_ENDIAN)
         for (i in 0 until totalFrames) {
             var acc = 0f
             for (c in 0 until channels) {
@@ -329,22 +351,34 @@ class AndroidTtsEngine(private val context: Context) {
                 val s = bb.getShort(off).toInt()
                 acc += s / 32768f
             }
-            mono[i] = acc / channels
+            val avg = acc / channels
+            mono[i] = avg
+            val s16 = (avg * 32767f).toInt().coerceIn(-32768, 32767).toShort()
+            outBb.putShort(s16)
         }
         val durationSec = totalFrames.toDouble() / sampleRate.toDouble()
-        if (sampleRate == 16000) return mono to durationSec
-
-        val targetLen = (durationSec * 16000.0).toInt().coerceAtLeast(1)
-        val resampled = FloatArray(targetLen)
-        val ratio = sampleRate.toDouble() / 16000.0
-        for (i in 0 until targetLen) {
-            val srcPos = i * ratio
-            val i0 = srcPos.toInt().coerceIn(0, totalFrames - 1)
-            val i1 = (i0 + 1).coerceIn(0, totalFrames - 1)
-            val frac = (srcPos - i0).toFloat()
-            resampled[i] = mono[i0] * (1f - frac) + mono[i1] * frac
+        val pcm16k = if (sampleRate == 16000) {
+            mono
+        } else {
+            val targetLen = (durationSec * 16000.0).toInt().coerceAtLeast(1)
+            val resampled = FloatArray(targetLen)
+            val ratio = sampleRate.toDouble() / 16000.0
+            for (i in 0 until targetLen) {
+                val srcPos = i * ratio
+                val i0 = srcPos.toInt().coerceIn(0, totalFrames - 1)
+                val i1 = (i0 + 1).coerceIn(0, totalFrames - 1)
+                val frac = (srcPos - i0).toFloat()
+                resampled[i] = mono[i0] * (1f - frac) + mono[i1] * frac
+            }
+            resampled
         }
-        return resampled to durationSec
+        return DecodedWav(
+            pcm16k = pcm16k,
+            durationSec = durationSec,
+            pcmRawBytes = monoPcm16Bytes,
+            rawSampleRate = sampleRate,
+            rawTotalFrames = totalFrames,
+        )
     }
 
     fun close() {

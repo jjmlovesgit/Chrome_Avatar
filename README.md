@@ -1,10 +1,16 @@
-# Chrome Avatar — 100% Browser-Local Conversational 512×512 AI Studio (WebGPU)
+# Chrome Avatar (+ Pixel 10 Native) — 100% Local 512×512 AI Avatar Studio (LiteRT + Gemini Nano)
 
-Real-time **512×512 talking-head avatars** (**Puck** & **Gretchen**) running **100% locally in Chrome via WebGPU** — combining **Chrome Built-in Gemini Nano** (or automatic in-browser **WebLLM**), **warm Windows SAPI neural voices** (`0 GB` VRAM), and Google's **LiteRT Tensor API → LiteRT.js (`@litertjs/core`) WebGPU** inference stack.
+Real-time **512×512 conversational talking-head avatars** (**Puck** & **Gretchen**) powered by **one single C++ LiteRT Tensor API pipeline** running **100% locally** in two form factors:
+1. **Desktop Chrome WebGPU Studio (`web/`):** **Chrome Built-in Gemini Nano** (or in-browser **WebLLM**) + warm Windows SAPI neural voices (`0 GB` VRAM) + **LiteRT.js (`@litertjs/core`) WebGPU** — **`44.5–54.6 FPS`** live with **`0.00 GB` VRAM drift**.
+2. **Native Android / Google Pixel 10 Studio (`pixel_avatar/`):** **100% offline** Kotlin + Jetpack Compose app using **LiteRT `2.3.0` (`WGPU-FP16`)** + **Pixel 10 AICore Gemini Nano** (`genai-prompt`) + **offline Android Neural TTS** — **`2.67 s` cold boot**, **`4.75 FPS`** (`210.6 ms`) sharp 512×512 (`38.15 dB`) zero-wait live talking heads (`3.6×` faster than mobile Chrome WebGPU).
 
 No Python inference server. No PyTorch runtime. No cloud LLM APIs. Built natively on Windows (VS 2022 MSVC + CMake, zero WSL).
 
 ![IMTalker Browser Studio — Live 512x512 WebGPU Avatar with Flat VRAM HUD and 3-Turn Dialogue](docs/studio_screenshot.png)
+
+<p align="center">
+  <img src="docs/pixel10_screenshot.png" alt="Pixel Avatar — 100% Offline Native Google Pixel 10 Studio (LiteRT 2.3.0 WGPU-FP16 + AICore Gemini Nano)" width="320" />
+</p>
 
 ---
 
@@ -64,35 +70,60 @@ Measured live via Windows GPU Process Memory (`Win32_PerfFormattedData_GPUPerfor
 | **After Turn 2/3** (Gretchen · `366` frames) | `44.2 FPS` (`22.6 ms`) | `273 ms` | **`4.16 GB`** | `4.18 GB` | `0.06 GB` |
 | **After Turn 3/3** (Puck · `198` frames) | `44.7 FPS` (`22.4 ms`) | `125 ms` | **`4.16 GB`** | `4.18 GB` | `0.08 GB` |
 
+### Native Google Pixel 10 (`Tensor G5`, Android 17) Benchmarks — 100% Offline
+
+| Pixel 10 Build (`512×512` Live) | Quality vs. PyTorch | `wav2vec2` + `fm_step` | Renderer (`512×512`) | **Raw GPU FPS** | App RAM (PSS) |
+| --- | --- | --- | --- | --- | --- |
+| Chrome 149 Mobile WebGPU (`fp16w`) | `63.6 dB` | `470 + 985 ms` | `752.1 ms` | `1.33 FPS` | Browser |
+| Native LiteRT `2.3.0` default GPU (`fp16w`) | `63.6 dB` | `113 + 155 ms` | `357.0 ms` | `2.80 FPS` | `2,136 MB` |
+| **Native LiteRT `2.3.0` `WGPU-FP16` (`hd_fast`)** | **`38.15 dB` (sharp)** | **`124 + 187 ms`** | **`210.6 ms`** | **`4.75 FPS` (`3.6×` Chrome)** | **`1,877 MB`** |
+
+- **Cold boot (all 3 models resident):** **`2.67 s`** (`WGPU-FP16` Vulkan shader cache)
+- **On-device LLM:** **AICore Gemini Nano** (`com.google.mlkit:genai-prompt:1.0.0-beta5`) — **`~1.3 s` / reply**, 100% offline
+- **On-device Voice:** Android Neural `TextToSpeech.synthesizeToFile()` — **`~207 ms`** to 16 kHz PCM, 100% offline
+
 ---
 
 ## Repository Layout
 
 ```text
 Chrome_Avatar/
-├── README.md                    # This file
-├── build.md                     # Complete engineering build log, milestones & WebGPU learnings
-├── Start_Studio.bat             # 1-click launcher: starts hidden server.mjs & opens Google Chrome
+├── README.md                    # This file (Desktop Chrome + Native Pixel 10 guide)
+├── build.md                     # Complete engineering build log, milestones & WebGPU/Pixel 10 learnings
+├── Start_Studio.bat             # 1-click desktop launcher: starts hidden server.mjs & opens Google Chrome
 ├── Stop_Studio.bat              # 1-click clean shutdown for the hidden background server
 ├── CMakeLists.txt               # Portable CMake target definitions for LiteRT Tensor API
 ├── fm_step_export.cc            # C++ LiteRT exporter: Flow Matching DiT -> fm_step_fp16w.tflite
-├── renderer_decode_export.cc    # C++ LiteRT exporter: StyleGAN + Swin + IMT -> renderer_decode_fp16w.tflite
+├── renderer_decode_export.cc    # C++ LiteRT exporter: StyleGAN + Swin + IMT -> fp16w / hd_fast .tflite
 ├── wav2vec2_export.cc           # C++ LiteRT exporter: Wav2Vec2 + projections -> wav2vec2_2s_fp16w.tflite
 ├── docs/
-│   └── studio_screenshot.png    # Live verified studio screenshot
+│   ├── studio_screenshot.png    # Live verified Chrome WebGPU Studio screenshot
+│   └── pixel10_screenshot.png   # Live verified Pixel 10 Tensor G5 native app screenshot
 ├── avatars/
 │   ├── blink_delta.bin          # [9, 32] speaking blink delta tokens
-│   ├── puck/                    # Precomputed 9.17 MB NHWC WebGPU face cache + 512x512 portrait
-│   └── gretchen/                # Precomputed 9.17 MB NHWC WebGPU face cache + 512x512 portrait
-└── web/
-    ├── demo.html                # 100% browser-local conversational studio UI
-    ├── server.mjs               # Zero-framework Node HTTP server (COOP/COEP + /api/tts + /api/vram)
-    ├── sapi_worker.ps1          # Persistent warm Windows SAPI 5 COM worker (~250 ms, 0 GB VRAM)
-    ├── vram_worker.ps1          # Persistent warm Windows GPU VRAM counter worker (~25 ms poll)
-    ├── package.json             # @litertjs/core + @mlc-ai/web-llm
-    ├── index.html               # Standalone fm_step.tflite WebGPU parity benchmark
-    ├── renderer.html            # Standalone renderer_decode.tflite 512x512 WebGPU benchmark
-    └── samples/                 # Real Windows SAPI demo WAVs for Puck & Gretchen
+│   ├── puck/                    # Precomputed 9.17 MB NHWC face cache + 512x512 portrait
+│   └── gretchen/                # Precomputed 9.17 MB NHWC face cache + 512x512 portrait
+├── web/
+│   ├── demo.html                # 100% browser-local conversational studio UI
+│   ├── server.mjs               # Zero-framework Node HTTP server (COOP/COEP + /api/tts + /api/vram)
+│   ├── sapi_worker.ps1          # Persistent warm Windows SAPI 5 COM worker (~250 ms, 0 GB VRAM)
+│   ├── vram_worker.ps1          # Persistent warm Windows GPU VRAM counter worker (~25 ms poll)
+│   ├── package.json             # @litertjs/core + @mlc-ai/web-llm
+│   ├── index.html               # Standalone fm_step.tflite WebGPU parity benchmark
+│   ├── renderer.html            # Standalone renderer_decode.tflite 512x512 WebGPU benchmark
+│   └── samples/                 # Real Windows SAPI demo WAVs for Puck & Gretchen
+└── pixel_avatar/                # 100% Offline Native Android Studio Project (Kotlin + Compose)
+    ├── build.gradle.kts         # Gradle 8.13 + Kotlin 2.4.0
+    └── app/
+        ├── build.gradle.kts     # LiteRT 2.3.0 (litert + litert-gpu) + ML Kit GenAI Prompt (AICore Nano)
+        └── src/main/
+            ├── java/com/pixelavatar/app/
+            │   ├── MainActivity.kt      # Dark Compose Studio (Live / 12.5FPS / 25FPS, 3-Turn Demo, Mic, RAM HUD)
+            │   ├── AvatarPipeline.kt    # Native LiteRT 2.3.0 WGPU-FP16 3-model engine + auto-download
+            │   ├── NanoLlmClient.kt     # Pixel 10 AICore Gemini Nano client
+            │   └── AndroidTtsEngine.kt  # Offline Android Neural TTS -> 16 kHz mono PCM WAV
+            ├── res/                     # Custom Gretchen adaptive circular launcher icon
+            └── assets/avatars/          # Bundled Puck & Gretchen face caches + blink_delta
 ```
 
 ---
@@ -147,6 +178,18 @@ Open a **normal (non-Incognito) Google Chrome** window *(use Google Chrome rathe
 - **Swap Avatars with Shared Memory:** Click **Puck** / **Gretchen** (or address them by name, e.g. *"Hey Gretchen, do you agree with Puck?"*) to swap the 512×512 avatar, Windows SAPI voice (`Andrew HD` ↔ `Jenny`), and personality prompt while sharing the same room conversation history.
 - **🎭 3-Turn Demo Chat:** Pick a topic from **Demo Topic** (default: *"What you did last weekend"*, or type a custom topic first) and click **🎭 3-Turn Demo Chat** to watch Puck and Gretchen have a live 3-turn back-and-forth conversation — then jump right in afterward. Click the red **■** button anytime to stop.
 - **Live Precision & Memory HUD:** Switch **Precision (`FP32` / `FP16`)** or **In-Browser LLM** directly in the UI — old WebGPU devices/engines are explicitly torn down and the top-right **Memory HUD** (`VRAM`, `Peak`, `Nano`, `WebGPU`, `JS`) recalculates automatically. Click the HUD anytime to force-refresh and reset `Peak` *(keep only one studio tab open for single-tab VRAM readings)*.
+
+---
+
+## Running the Native Android / Pixel 10 App (`pixel_avatar/`)
+
+1. Open **`Chrome_Avatar/pixel_avatar`** in **Android Studio** (uses JDK 21 / Android Studio JBR, Gradle 8.13, Kotlin 2.4.0, `compileSdk = 36`, `minSdk = 28`).
+2. Connect your **Google Pixel 10** (or any arm64 Android device with USB Debugging enabled) and click **Run ▶**.
+3. **First launch:** The app automatically downloads the 3 FP16-weight `.tflite` models (`wav2vec2_2s_fp16w.tflite`, `fm_step_fp16w.tflite`, and mobile-optimized `renderer_decode_hd_fast.tflite` — `386 MB` total) from [Release `v1.0.0`](https://github.com/jjmlovesgit/Chrome_Avatar/releases/tag/v1.0.0) into app-private storage, compiles them on **LiteRT `2.3.0` (`WGPU-FP16`)**, and verifies **AICore Gemini Nano**.
+4. **After first launch:** Unplug USB and turn on Airplane Mode — **Pixel Avatar** (Gretchen's circular icon in your app drawer) runs **100% offline**!
+   - Tap **Puck** / **Gretchen** or **3-Turn Demo** to watch live banter, or tap **Mic** / type to ask anything.
+   - Tap **Playback: Live (Zero-Wait)** to switch between instant zero-wait live rendering (`4.75 FPS`), **12.5 FPS Smooth**, or **25 FPS Smooth**.
+   - To mirror your Pixel 10 screen on your PC inside Android Studio, open **View → Tool Windows → Running Devices**.
 
 ---
 

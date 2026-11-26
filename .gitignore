@@ -17,3 +17,12 @@ ref_wav2vec2/
 web/.server.pid
 .DS_Store
 Thumbs.db
+
+# Android Studio / Gradle
+pixel_avatar/.gradle/
+pixel_avatar/.kotlin/
+pixel_avatar/.idea/
+pixel_avatar/build/
+pixel_avatar/app/build/
+pixel_avatar/local.properties
+

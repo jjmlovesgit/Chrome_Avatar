@@ -60,6 +60,7 @@ using litert::tensor::Mul;
 using litert::tensor::OwningCpuBuffer;
 using litert::tensor::Pad;
 using litert::tensor::Reshape;
+using litert::tensor::ResizeBilinear;
 using litert::tensor::ResizeNearestNeighbor;
 using litert::tensor::Rsqrt;
 using litert::tensor::Slice;
@@ -76,9 +77,55 @@ using litert::tensor::examples::SafetensorLoader;
 using T = Tensor<TfLiteMixinTag>;
 
 bool g_fp16_weights = false;
+bool g_int8_weights = false;
+bool g_fast_mobile = false;
+bool g_fast_synth64 = false;
+bool g_skip_swin256 = false;
+bool g_skip_swin256_attn = false;
+bool g_fast_swin256 = false;
+bool g_fast_swin128 = false;
+bool g_skip_swin128 = false;
+bool g_skip_swin128_b1 = false;
+bool g_skip_res256_extra = false;
+bool g_out_256 = false;
 
 T MakeConstF32(const std::string& name, std::vector<int> shape,
                const std::vector<float>& data) {
+  if (g_int8_weights && data.size() >= 4096 &&
+      (shape.size() == 2 || shape.size() == 4) && shape[0] > 1) {
+    const int out_c = shape[0];
+    const size_t inner = data.size() / static_cast<size_t>(out_c);
+    std::vector<int8_t> q(data.size());
+    std::vector<float> scales(out_c);
+    std::vector<int64_t> zps(out_c, 0);
+    for (int o = 0; o < out_c; ++o) {
+      float max_abs = 0.0f;
+      const size_t base = static_cast<size_t>(o) * inner;
+      for (size_t j = 0; j < inner; ++j) {
+        float a = std::abs(data[base + j]);
+        if (a > max_abs) max_abs = a;
+      }
+      float s = (max_abs > 1e-8f) ? (max_abs / 127.0f) : 1e-8f;
+      scales[o] = s;
+      float inv_s = 1.0f / s;
+      for (size_t j = 0; j < inner; ++j) {
+        int v = static_cast<int>(std::lrint(data[base + j] * inv_s));
+        if (v > 127) v = 127;
+        else if (v < -127) v = -127;
+        q[base + j] = static_cast<int8_t>(v);
+      }
+    }
+    T raw({.name = name + "_i8",
+           .type = Type::kI8,
+           .shape = std::move(shape),
+           .buffer = OwningCpuBuffer::Copy<Type::kI8>(q)});
+    auto quant = std::make_shared<litert::tensor::PerChannelAffineQuantization>();
+    quant->scales = std::move(scales);
+    quant->zero_points = std::move(zps);
+    quant->quantized_dimension = 0;
+    raw.SetQuantization(std::move(quant));
+    return litert::tensor::Dequantize(raw);
+  }
   if (g_fp16_weights && data.size() >= 4096) {
     std::vector<litert::tensor::fp16_t> h(data.size());
     for (size_t i = 0; i < data.size(); ++i) h[i] = litert::tensor::fp16_t(data[i]);
@@ -229,7 +276,8 @@ absl::StatusOr<T> ApplyFeatResBlock(const SafetensorLoader& loader,
 // ConvResBlock / UpConvResBlock (modules.py)
 absl::StatusOr<T> ApplyResBlock(const SafetensorLoader& loader,
                                 const std::string& pfx, T x,
-                                int upsample_to_res) {
+                                int upsample_to_res,
+                                bool skip_extra_feat_res = false) {
   if (upsample_to_res > 0) {
     x = ResizeNearestNeighbor(x, {upsample_to_res, upsample_to_res},
                               /*align_corners=*/false,
@@ -243,8 +291,10 @@ absl::StatusOr<T> ApplyResBlock(const SafetensorLoader& loader,
                               ApplyConv3x3(loader, pfx + ".conv2.weight", "", out));
   LRT_TENSOR_ASSIGN_OR_RETURN(
       out, ApplyFeatResBlock(loader, pfx + ".feat_res_block1", out));
-  LRT_TENSOR_ASSIGN_OR_RETURN(
-      out, ApplyFeatResBlock(loader, pfx + ".feat_res_block2", out));
+  if (!skip_extra_feat_res) {
+    LRT_TENSOR_ASSIGN_OR_RETURN(
+        out, ApplyFeatResBlock(loader, pfx + ".feat_res_block2", out));
+  }
   return out;
 }
 
@@ -362,20 +412,66 @@ absl::StatusOr<T> ApplyUnifiedTransformerBlock(const SafetensorLoader& loader,
                                                int res, int dim) {
   const int n = res * res;
   T seq = Reshape(x, {1, n, dim});
-  LRT_TENSOR_ASSIGN_OR_RETURN(T q_pos,
-                              LoadRawF32(loader, pfx + ".q_pos_embedding"));
-  LRT_TENSOR_ASSIGN_OR_RETURN(T k_pos,
-                              LoadRawF32(loader, pfx + ".k_pos_embedding"));
-  LRT_TENSOR_ASSIGN_OR_RETURN(
-      T q_norm, ApplyLayerNorm(loader, pfx + ".norm_q", Add(seq, q_pos), 2));
-  LRT_TENSOR_ASSIGN_OR_RETURN(
-      T k_norm, ApplyLayerNorm(loader, pfx + ".norm_kv", Add(seq, k_pos), 2));
-  LRT_TENSOR_ASSIGN_OR_RETURN(
-      T v_norm, ApplyLayerNorm(loader, pfx + ".norm_kv", seq, 2));
-  LRT_TENSOR_ASSIGN_OR_RETURN(
-      auto attn_pair, ApplyStandardAttn(loader, pfx + ".attn", q_norm, k_norm,
-                                        v_norm, n, dim, /*num_heads=*/8));
-  T h = Add(seq, attn_pair.first);
+  T attn_delta = seq;
+  if ((g_fast_mobile || g_fast_synth64) && res == 64) {
+    // 16x smaller attention (32x32 = 1024 tokens instead of 64x64 = 4096 tokens)
+    // while preserving the full-resolution 64x64 residual & FFN path!
+    constexpr int kHalf = 32;
+    constexpr int kNHalf = kHalf * kHalf;
+    T x_half = ResizeBilinear(x, {kHalf, kHalf}, /*align_corners=*/false,
+                              /*half_pixel_centers=*/true);
+    T seq_half = Reshape(x_half, {1, kNHalf, dim});
+    LRT_TENSOR_ASSIGN_OR_RETURN(std::vector<float> qp_raw,
+                                loader.ReadTensorAs<float>(pfx + ".q_pos_embedding"));
+    LRT_TENSOR_ASSIGN_OR_RETURN(std::vector<float> kp_raw,
+                                loader.ReadTensorAs<float>(pfx + ".k_pos_embedding"));
+    auto PoolPos2x = [&](const std::vector<float>& src) {
+      std::vector<float> dst(kNHalf * dim, 0.0f);
+      for (int r = 0; r < kHalf; ++r) {
+        for (int c = 0; c < kHalf; ++c) {
+          for (int d = 0; d < dim; ++d) {
+            float s = 0.0f;
+            for (int dr = 0; dr < 2; ++dr)
+              for (int dc = 0; dc < 2; ++dc)
+                s += src[((r * 2 + dr) * 64 + (c * 2 + dc)) * dim + d];
+            dst[(r * kHalf + c) * dim + d] = s * 0.25f;
+          }
+        }
+      }
+      return dst;
+    };
+    T q_pos = MakeConstF32(pfx + ".q_pos_32", {1, kNHalf, dim}, PoolPos2x(qp_raw));
+    T k_pos = MakeConstF32(pfx + ".k_pos_32", {1, kNHalf, dim}, PoolPos2x(kp_raw));
+    LRT_TENSOR_ASSIGN_OR_RETURN(
+        T q_norm, ApplyLayerNorm(loader, pfx + ".norm_q", Add(seq_half, q_pos), 2));
+    LRT_TENSOR_ASSIGN_OR_RETURN(
+        T k_norm, ApplyLayerNorm(loader, pfx + ".norm_kv", Add(seq_half, k_pos), 2));
+    LRT_TENSOR_ASSIGN_OR_RETURN(
+        T v_norm, ApplyLayerNorm(loader, pfx + ".norm_kv", seq_half, 2));
+    LRT_TENSOR_ASSIGN_OR_RETURN(
+        auto attn_pair, ApplyStandardAttn(loader, pfx + ".attn", q_norm, k_norm,
+                                          v_norm, kNHalf, dim, /*num_heads=*/8));
+    T up = ResizeBilinear(Reshape(attn_pair.first, {1, kHalf, kHalf, dim}),
+                          {res, res}, /*align_corners=*/false,
+                          /*half_pixel_centers=*/true);
+    attn_delta = Reshape(up, {1, n, dim});
+  } else {
+    LRT_TENSOR_ASSIGN_OR_RETURN(T q_pos,
+                                LoadRawF32(loader, pfx + ".q_pos_embedding"));
+    LRT_TENSOR_ASSIGN_OR_RETURN(T k_pos,
+                                LoadRawF32(loader, pfx + ".k_pos_embedding"));
+    LRT_TENSOR_ASSIGN_OR_RETURN(
+        T q_norm, ApplyLayerNorm(loader, pfx + ".norm_q", Add(seq, q_pos), 2));
+    LRT_TENSOR_ASSIGN_OR_RETURN(
+        T k_norm, ApplyLayerNorm(loader, pfx + ".norm_kv", Add(seq, k_pos), 2));
+    LRT_TENSOR_ASSIGN_OR_RETURN(
+        T v_norm, ApplyLayerNorm(loader, pfx + ".norm_kv", seq, 2));
+    LRT_TENSOR_ASSIGN_OR_RETURN(
+        auto attn_pair, ApplyStandardAttn(loader, pfx + ".attn", q_norm, k_norm,
+                                          v_norm, n, dim, /*num_heads=*/8));
+    attn_delta = attn_pair.first;
+  }
+  T h = Add(seq, attn_delta);
   LRT_TENSOR_ASSIGN_OR_RETURN(
       T h_norm, ApplyLayerNorm(loader, pfx + ".norm_ffn", h, 2));
   LRT_TENSOR_ASSIGN_OR_RETURN(T m, ApplyLinear(loader, pfx + ".mlp.0", h_norm));
@@ -423,78 +519,89 @@ T WindowReverse4D(T x, int h, int w, int c, int win) {
 }
 
 // UnifiedSwinBlock (self-attention at 128x128 & 256x256, window_size=8)
+// mode: 0 = exact full-res, 1 = 2x downsampled attn (4x faster, full-res MLP), 2 = skip attn (MLP only)
 absl::StatusOr<T> ApplyUnifiedSwinBlock(const SafetensorLoader& loader,
                                         const std::string& pfx, T x, int res,
-                                        int dim, int shift_size) {
-  constexpr int kWin = 8;
-  constexpr int kWinSq = kWin * kWin;  // 64
-  constexpr int kHeads = 8;
-  const int head_dim = dim / kHeads;
-  const int nw_total = (res / kWin) * (res / kWin);
-  const float scale = 1.0f / std::sqrt(static_cast<float>(head_dim));
+                                        int dim, int shift_size, int mode = 0) {
+  T out = x;
+  if (mode != 2) {
+    constexpr int kWin = 8;
+    constexpr int kWinSq = kWin * kWin;  // 64
+    constexpr int kHeads = 8;
+    const int head_dim = dim / kHeads;
+    const int work_res = (mode == 1) ? (res / 2) : res;
+    const int nw_total = (work_res / kWin) * (work_res / kWin);
+    const float scale = 1.0f / std::sqrt(static_cast<float>(head_dim));
+    const int eff_shift = (mode == 1) ? 0 : shift_size;
 
-  T shortcut = x;
-  LRT_TENSOR_ASSIGN_OR_RETURN(T q_in,
-                              ApplyLayerNorm(loader, pfx + ".norm_q", x, 3));
-  LRT_TENSOR_ASSIGN_OR_RETURN(T kv_in,
-                              ApplyLayerNorm(loader, pfx + ".norm_kv", x, 3));
+    T x_work = (mode == 1)
+                   ? ResizeBilinear(x, {work_res, work_res}, false, true)
+                   : x;
+    LRT_TENSOR_ASSIGN_OR_RETURN(T q_in,
+                                ApplyLayerNorm(loader, pfx + ".norm_q", x_work, 3));
+    LRT_TENSOR_ASSIGN_OR_RETURN(T kv_in,
+                                ApplyLayerNorm(loader, pfx + ".norm_kv", x_work, 3));
 
-  if (shift_size > 0) {
-    q_in = CyclicRollNHWC(q_in, res, res, dim, -shift_size, -shift_size);
-    kv_in = CyclicRollNHWC(kv_in, res, res, dim, -shift_size, -shift_size);
-  }
+    if (eff_shift > 0) {
+      q_in = CyclicRollNHWC(q_in, work_res, work_res, dim, -eff_shift, -eff_shift);
+      kv_in = CyclicRollNHWC(kv_in, work_res, work_res, dim, -eff_shift, -eff_shift);
+    }
 
-  T q_win = WindowPartition4D(q_in, res, res, dim, kWin);   // [nW, 64, C]
-  T kv_win = WindowPartition4D(kv_in, res, res, dim, kWin);  // [nW, 64, C]
+    T q_win = WindowPartition4D(q_in, work_res, work_res, dim, kWin);   // [nW, 64, C]
+    T kv_win = WindowPartition4D(kv_in, work_res, work_res, dim, kWin);  // [nW, 64, C]
 
-  // SwinUnifiedAttention
-  const std::string apfx = pfx + ".attn";
-  LRT_TENSOR_ASSIGN_OR_RETURN(T q, ApplyLinear(loader, apfx + ".q", q_win));
-  LRT_TENSOR_ASSIGN_OR_RETURN(T k, ApplyLinear(loader, apfx + ".k", kv_win));
-  LRT_TENSOR_ASSIGN_OR_RETURN(T v, ApplyLinear(loader, apfx + ".v", kv_win));
-  q = Transpose(Reshape(q, {nw_total, kWinSq, kHeads, head_dim}), {0, 2, 1, 3});
-  k = Transpose(Reshape(k, {nw_total, kWinSq, kHeads, head_dim}), {0, 2, 1, 3});
-  v = Transpose(Reshape(v, {nw_total, kWinSq, kHeads, head_dim}), {0, 2, 1, 3});
+    // SwinUnifiedAttention
+    const std::string apfx = pfx + ".attn";
+    LRT_TENSOR_ASSIGN_OR_RETURN(T q, ApplyLinear(loader, apfx + ".q", q_win));
+    LRT_TENSOR_ASSIGN_OR_RETURN(T k, ApplyLinear(loader, apfx + ".k", kv_win));
+    LRT_TENSOR_ASSIGN_OR_RETURN(T v, ApplyLinear(loader, apfx + ".v", kv_win));
+    q = Transpose(Reshape(q, {nw_total, kWinSq, kHeads, head_dim}), {0, 2, 1, 3});
+    k = Transpose(Reshape(k, {nw_total, kWinSq, kHeads, head_dim}), {0, 2, 1, 3});
+    v = Transpose(Reshape(v, {nw_total, kWinSq, kHeads, head_dim}), {0, 2, 1, 3});
 
-  T scores = BatchMatMul(Mul(q, scale), k, /*adj_x=*/false, /*adj_y=*/true);
+    T scores = BatchMatMul(Mul(q, scale), k, /*adj_x=*/false, /*adj_y=*/true);
 
-  // Precompute static relative_position_bias [1, 8, 64, 64]
-  LRT_TENSOR_ASSIGN_OR_RETURN(
-      std::vector<float> rpb_table,
-      loader.ReadTensorAs<float>(apfx + ".relative_position_bias_table"));
-  LRT_TENSOR_ASSIGN_OR_RETURN(
-      std::vector<int64_t> rpb_idx,
-      loader.ReadTensorAs<int64_t>(apfx + ".relative_position_index"));
-  std::vector<float> rpb(kHeads * kWinSq * kWinSq);
-  for (int i = 0; i < kWinSq; ++i) {
-    for (int j = 0; j < kWinSq; ++j) {
-      int64_t idx = rpb_idx[i * kWinSq + j];
-      for (int hd = 0; hd < kHeads; ++hd) {
-        rpb[(hd * kWinSq + i) * kWinSq + j] = rpb_table[idx * kHeads + hd];
+    // Precompute static relative_position_bias [1, 8, 64, 64]
+    LRT_TENSOR_ASSIGN_OR_RETURN(
+        std::vector<float> rpb_table,
+        loader.ReadTensorAs<float>(apfx + ".relative_position_bias_table"));
+    LRT_TENSOR_ASSIGN_OR_RETURN(
+        std::vector<int64_t> rpb_idx,
+        loader.ReadTensorAs<int64_t>(apfx + ".relative_position_index"));
+    std::vector<float> rpb(kHeads * kWinSq * kWinSq);
+    for (int i = 0; i < kWinSq; ++i) {
+      for (int j = 0; j < kWinSq; ++j) {
+        int64_t idx = rpb_idx[i * kWinSq + j];
+        for (int hd = 0; hd < kHeads; ++hd) {
+          rpb[(hd * kWinSq + i) * kWinSq + j] = rpb_table[idx * kHeads + hd];
+        }
       }
     }
+    T rpb_t = MakeConstF32(apfx + ".rpb_static", {1, kHeads, kWinSq, kWinSq}, rpb);
+    scores = Add(scores, rpb_t);
+
+    if (eff_shift > 0) {
+      LRT_TENSOR_ASSIGN_OR_RETURN(
+          T mask, LoadRawF32(loader, pfx + ".attn_mask",
+                             {nw_total, 1, kWinSq, kWinSq}));
+      scores = Add(scores, mask);
+    }
+
+    T attn = Softmax(scores);
+    T ctx = BatchMatMul(attn, v);
+    ctx = Reshape(Transpose(ctx, {0, 2, 1, 3}), {nw_total, kWinSq, dim});
+    LRT_TENSOR_ASSIGN_OR_RETURN(T attn_win,
+                                ApplyLinear(loader, apfx + ".proj", ctx));
+
+    T shifted_x = WindowReverse4D(attn_win, work_res, work_res, dim, kWin);
+    T delta = (eff_shift > 0)
+                  ? CyclicRollNHWC(shifted_x, work_res, work_res, dim, eff_shift, eff_shift)
+                  : shifted_x;
+    if (mode == 1) {
+      delta = ResizeBilinear(delta, {res, res}, false, true);
+    }
+    out = Add(x, delta);
   }
-  T rpb_t = MakeConstF32(apfx + ".rpb_static", {1, kHeads, kWinSq, kWinSq}, rpb);
-  scores = Add(scores, rpb_t);
-
-  if (shift_size > 0) {
-    LRT_TENSOR_ASSIGN_OR_RETURN(
-        T mask, LoadRawF32(loader, pfx + ".attn_mask",
-                           {nw_total, 1, kWinSq, kWinSq}));
-    scores = Add(scores, mask);
-  }
-
-  T attn = Softmax(scores);
-  T ctx = BatchMatMul(attn, v);
-  ctx = Reshape(Transpose(ctx, {0, 2, 1, 3}), {nw_total, kWinSq, dim});
-  LRT_TENSOR_ASSIGN_OR_RETURN(T attn_win,
-                              ApplyLinear(loader, apfx + ".proj", ctx));
-
-  T shifted_x = WindowReverse4D(attn_win, res, res, dim, kWin);
-  T out = (shift_size > 0)
-              ? CyclicRollNHWC(shifted_x, res, res, dim, shift_size, shift_size)
-              : shifted_x;
-  out = Add(shortcut, out);
 
   LRT_TENSOR_ASSIGN_OR_RETURN(
       T out_norm, ApplyLayerNorm(loader, pfx + ".norm_ffn", out, 3));
@@ -586,30 +693,56 @@ absl::Status ExportRendererDecode(const std::string& safetensors_path,
   for (int lvl = 0; lvl < 4; ++lvl) {
     int r = coarse_res[lvl];
     int d = coarse_dim[lvl];
-    int n = r * r;
-    T a_seq = Reshape(ma_c[lvl], {1, n, d});
-    T b_seq = Reshape(ma_r[lvl], {1, n, d});
-    T c_seq = Reshape(f_r[lvl], {1, n, d});
-    LRT_TENSOR_ASSIGN_OR_RETURN(
-        auto res_pair,
-        ApplyStandardAttn(loader, absl::StrCat("imt.", lvl, ".block_efc"), a_seq,
-                          b_seq, c_seq, n, d, /*num_heads=*/8));
-    aligned.push_back(Reshape(res_pair.first, {1, r, r, d}));
-    if (lvl == 3) {
-      attn_64 = res_pair.second;  // [1, 8, 4096, 4096]
+    if (g_fast_mobile && lvl == 3) {
+      // 16x smaller IMT Level-3 attention (32x32 = 1024 instead of 64x64 = 4096)
+      constexpr int kHalf = 32;
+      constexpr int kNHalf = kHalf * kHalf;
+      T a32 = ResizeBilinear(ma_c[3], {kHalf, kHalf}, false, true);
+      T b32 = ResizeBilinear(ma_r[3], {kHalf, kHalf}, false, true);
+      T c32 = ResizeBilinear(f_r[3], {kHalf, kHalf}, false, true);
+      LRT_TENSOR_ASSIGN_OR_RETURN(
+          auto res_pair,
+          ApplyStandardAttn(loader, "imt.3.block_efc",
+                            Reshape(a32, {1, kNHalf, d}),
+                            Reshape(b32, {1, kNHalf, d}),
+                            Reshape(c32, {1, kNHalf, d}), kNHalf, d, 8));
+      aligned.push_back(ResizeBilinear(
+          Reshape(res_pair.first, {1, kHalf, kHalf, d}), {64, 64}, false, true));
+      attn_64 = res_pair.second;  // [1, 8, 1024, 1024]
+    } else {
+      int n = r * r;
+      T a_seq = Reshape(ma_c[lvl], {1, n, d});
+      T b_seq = Reshape(ma_r[lvl], {1, n, d});
+      T c_seq = Reshape(f_r[lvl], {1, n, d});
+      LRT_TENSOR_ASSIGN_OR_RETURN(
+          auto res_pair,
+          ApplyStandardAttn(loader, absl::StrCat("imt.", lvl, ".block_efc"), a_seq,
+                            b_seq, c_seq, n, d, /*num_heads=*/8));
+      aligned.push_back(Reshape(res_pair.first, {1, r, r, d}));
+      if (lvl == 3) {
+        attn_64 = res_pair.second;  // [1, 8, 4096, 4096]
+      }
     }
   }
 
   // Exact algebraic GuidedResampler for levels 4 (128x128) and 5 (256x256):
-  // attn_mean = mean(attn_64, axis=1) [1, 4096, 4096] -> argmax -> Gather -> ResizeNearest
   T attn_mean = Mean(attn_64, std::vector<int>{1}, /*keep_dims=*/false);
-  T argmax_idx = Reshape(ArgMax(attn_mean, /*axis=*/2, Type::kI32), {4096});
-
-  T g4 = Reshape(Gather(f_r_4_pool, argmax_idx, /*axis=*/0), {1, 64, 64, 64});
-  aligned.push_back(ResizeNearestNeighbor(g4, {128, 128}, false, false));
-
-  T g5 = Reshape(Gather(f_r_5_pool, argmax_idx, /*axis=*/0), {1, 64, 64, 32});
-  aligned.push_back(ResizeNearestNeighbor(g5, {256, 256}, false, false));
+  if (g_fast_mobile) {
+    T argmax_idx = Reshape(ArgMax(attn_mean, /*axis=*/2, Type::kI32), {1024});
+    T p4_32 = Reshape(ResizeBilinear(Reshape(f_r_4_pool, {1, 64, 64, 64}), {32, 32}, false, true), {1024, 64});
+    T p5_32 = Reshape(ResizeBilinear(Reshape(f_r_5_pool, {1, 64, 64, 32}), {32, 32}, false, true), {1024, 32});
+    T g4 = Reshape(Gather(p4_32, argmax_idx, /*axis=*/0), {1, 32, 32, 64});
+    aligned.push_back(ResizeBilinear(g4, {128, 128}, false, true));
+    T g5 = Reshape(Gather(p5_32, argmax_idx, /*axis=*/0), {1, 32, 32, 32});
+    aligned.push_back(ResizeBilinear(g5, {256, 256}, false, true));
+  } else {
+    T argmax_idx = Reshape(ArgMax(attn_mean, /*axis=*/2, Type::kI32), {4096});
+    T g4 = Reshape(Gather(f_r_4_pool, argmax_idx, /*axis=*/0), {1, 64, 64, 64});
+    aligned.push_back(ResizeNearestNeighbor(g4, {128, 128}, false, false));
+    T g5 = Reshape(Gather(f_r_5_pool, argmax_idx, /*axis=*/0), {1, 64, 64, 32});
+    int last_res = g_out_256 ? 128 : 256;
+    aligned.push_back(ResizeNearestNeighbor(g5, {last_res, last_res}, false, false));
+  }
 
   // =========================================================================
   // Stage 4: SynthesisNetwork (frame_decoder.*)
@@ -621,23 +754,44 @@ absl::Status ExportRendererDecode(const std::string& safetensors_path,
   for (int i = 0; i < 5; ++i) {
     int r = synth_res[i];
     int d = synth_dim[i];
+    int eff_r = (g_out_256 && i == 4) ? 128 : r;
+    int up_r = (g_out_256 && i == 4) ? 0 : r;
+    const bool skip_extra = (g_skip_res256_extra && r == 256);
     LRT_TENSOR_ASSIGN_OR_RETURN(
         x, ApplyResBlock(loader,
-                         absl::StrCat("frame_decoder.upconv_blocks.", i), x, r));
+                         absl::StrCat("frame_decoder.upconv_blocks.", i), x, up_r,
+                         skip_extra));
     x = Concatenation({x, aligned[i + 1]}, /*axis=*/3);
     LRT_TENSOR_ASSIGN_OR_RETURN(
         x, ApplyResBlock(loader, absl::StrCat("frame_decoder.resblocks.", i), x,
-                         /*upsample_to_res=*/0));
+                         /*upsample_to_res=*/0, skip_extra));
     const std::string tb_pfx =
         absl::StrCat("frame_decoder.transformer_blocks.", i);
     if (r < 128) {
       LRT_TENSOR_ASSIGN_OR_RETURN(
           x, ApplyUnifiedTransformerBlock(loader, tb_pfx + ".blocks.0", x, r, d));
+    } else if (r == 128) {
+      if (!g_skip_swin128) {
+        int m128 = g_fast_swin128 ? 1 : 0;
+        LRT_TENSOR_ASSIGN_OR_RETURN(
+            x, ApplyUnifiedSwinBlock(loader, tb_pfx + ".blocks.0", x, r, d, 0, m128));
+        if (!g_skip_swin128_b1) {
+          LRT_TENSOR_ASSIGN_OR_RETURN(
+              x, ApplyUnifiedSwinBlock(loader, tb_pfx + ".blocks.1", x, r, d, 4, m128));
+        }
+      }
     } else {
-      LRT_TENSOR_ASSIGN_OR_RETURN(
-          x, ApplyUnifiedSwinBlock(loader, tb_pfx + ".blocks.0", x, r, d, 0));
-      LRT_TENSOR_ASSIGN_OR_RETURN(
-          x, ApplyUnifiedSwinBlock(loader, tb_pfx + ".blocks.1", x, r, d, 4));
+      // r == 256 (or 128 when g_out_256 is true!)
+      if (!g_skip_swin256) {
+        int m256 = g_skip_swin256_attn ? 2 : (g_fast_swin256 ? 1 : 0);
+        // When g_out_256 is set, eff_r=128 so m256=1 runs Swin at 64x64 (16x fewer windows than 256!)
+        // and shift_size=0 avoids mismatched 256x256 attn_mask shapes.
+        int sh1 = g_out_256 ? 0 : 4;
+        LRT_TENSOR_ASSIGN_OR_RETURN(
+            x, ApplyUnifiedSwinBlock(loader, tb_pfx + ".blocks.0", x, eff_r, d, 0, m256));
+        LRT_TENSOR_ASSIGN_OR_RETURN(
+            x, ApplyUnifiedSwinBlock(loader, tb_pfx + ".blocks.1", x, eff_r, d, sh1, m256));
+      }
     }
   }
 
@@ -753,21 +907,42 @@ absl::Status VerifyTflite(const std::string& tflite_path,
   double ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
 
   const TfLiteTensor* out = runner->output_tensor("frame");
-  if (!out || out->bytes != frame_ref.size() * sizeof(float)) {
-    return absl::InvalidArgumentError("Output tensor 'frame' mismatch.");
+  if (!out) {
+    return absl::InvalidArgumentError("Output tensor 'frame' missing.");
+  }
+  const int out_h = out->dims->data[1];
+  const int out_w = out->dims->data[2];
+  std::vector<float> ref_cmp = frame_ref;
+  if (out_h == 256 && out_w == 256 && frame_ref.size() == 512 * 512 * 3) {
+    // 2x2 box-downsample 512x512 reference to 256x256 for apples-to-apples PSNR!
+    ref_cmp.assign(256 * 256 * 3, 0.0f);
+    for (int y = 0; y < 256; ++y) {
+      for (int x = 0; x < 256; ++x) {
+        for (int c = 0; c < 3; ++c) {
+          float s = 0.0f;
+          for (int dy = 0; dy < 2; ++dy)
+            for (int dx = 0; dx < 2; ++dx)
+              s += frame_ref[((y * 2 + dy) * 512 + (x * 2 + dx)) * 3 + c];
+          ref_cmp[(y * 256 + x) * 3 + c] = s * 0.25f;
+        }
+      }
+    }
+  }
+  if (out->bytes != ref_cmp.size() * sizeof(float)) {
+    return absl::InvalidArgumentError("Output tensor 'frame' size mismatch.");
   }
 
   double mse = 0.0, sum_abs = 0.0, max_abs = 0.0;
-  for (size_t i = 0; i < frame_ref.size(); ++i) {
+  for (size_t i = 0; i < ref_cmp.size(); ++i) {
     double diff = static_cast<double>(out->data.f[i]) -
-                  static_cast<double>(frame_ref[i]);
+                  static_cast<double>(ref_cmp[i]);
     double ad = std::abs(diff);
     if (ad > max_abs) max_abs = ad;
     sum_abs += ad;
     mse += diff * diff;
   }
-  mse /= static_cast<double>(frame_ref.size());
-  double mae_255 = (sum_abs / static_cast<double>(frame_ref.size())) * 255.0;
+  mse /= static_cast<double>(ref_cmp.size());
+  double mae_255 = (sum_abs / static_cast<double>(ref_cmp.size())) * 255.0;
   double max_255 = max_abs * 255.0;
   double psnr = (mse > 1e-15) ? (10.0 * std::log10(1.0 / mse)) : 99.99;
 
@@ -776,9 +951,9 @@ absl::Status VerifyTflite(const std::string& tflite_path,
   ofs.write(reinterpret_cast<const char*>(out->data.f), out->bytes);
 
   std::cout << absl::StrFormat(
-      "VERIFY CPU (TFLite XNNPACK): %.1f ms | PSNR=%.2f dB | "
+      "VERIFY CPU (%dx%d TFLite XNNPACK): %.1f ms | PSNR=%.2f dB | "
       "MAE=%.4f/255 | max_err=%.4f/255\n",
-      ms, psnr, mae_255, max_255);
+      out_h, out_w, ms, psnr, mae_255, max_255);
   return absl::OkStatus();
 }
 
@@ -794,6 +969,17 @@ int main(int argc, char** argv) {
   for (int i = 3; i < argc; ++i) {
     std::string a = argv[i];
     if (a == "--fp16-weights") g_fp16_weights = true;
+    else if (a == "--int8-weights") g_int8_weights = true;
+    else if (a == "--fast-mobile") g_fast_mobile = true;
+    else if (a == "--fast-synth64") g_fast_synth64 = true;
+    else if (a == "--skip-swin256") g_skip_swin256 = true;
+    else if (a == "--skip-swin256-attn") g_skip_swin256_attn = true;
+    else if (a == "--fast-swin256") g_fast_swin256 = true;
+    else if (a == "--fast-swin128") g_fast_swin128 = true;
+    else if (a == "--skip-swin128") g_skip_swin128 = true;
+    else if (a == "--skip-swin128-b1") g_skip_swin128_b1 = true;
+    else if (a == "--skip-res256-extra") g_skip_res256_extra = true;
+    else if (a == "--out-256") g_out_256 = true;
     else if (a == "--verify" && i + 1 < argc) verify_dir = argv[++i];
   }
   absl::Status status = ExportRendererDecode(argv[1], argv[2]);

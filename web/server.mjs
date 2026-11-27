@@ -38,6 +38,7 @@ class SapiWorker {
     this.pending = new Map();
     this.queue = Promise.resolve();
     this.ready = false;
+    this.voices = [];
     this.readyPromise = new Promise((resolve) => { this._resolveReady = resolve; });
     this._start();
   }
@@ -58,6 +59,7 @@ class SapiWorker {
         const msg = JSON.parse(s);
         if (msg.ready) {
           this.ready = true;
+          this.voices = Array.isArray(msg.voices) ? msg.voices : [];
           console.log(`SAPI worker ready (${msg.voiceCount} voices installed)`);
           this._resolveReady();
           return;
@@ -87,6 +89,15 @@ class SapiWorker {
       this.proc = null;
       this.ready = false;
     });
+  }
+
+  async listVoices() {
+    if (!this.proc) {
+      this.readyPromise = new Promise((resolve) => { this._resolveReady = resolve; });
+      this._start();
+    }
+    await this.readyPromise;
+    return this.voices;
   }
 
   async synthesize(text, voiceQuery) {
@@ -232,6 +243,19 @@ const COMMON_HEADERS = {
 
 const server = http.createServer(async (req, res) => {
   const urlPath = (req.url || '/').split('?')[0];
+
+  // GET /api/voices -> Full list of installed Windows SAPI 5 voices
+  if (req.method === 'GET' && urlPath === '/api/voices') {
+    try {
+      const voices = await sapi.listVoices();
+      res.writeHead(200, { ...COMMON_HEADERS, 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ ok: true, count: voices.length, voices, defaults: DEFAULT_VOICES }));
+    } catch (e) {
+      res.writeHead(500, { ...COMMON_HEADERS, 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ ok: false, error: String(e?.message || e) }));
+    }
+    return;
+  }
 
   // GET /api/vram -> Live Windows per-process GPU VRAM breakdown (~16 ms warm!)
   if (req.method === 'GET' && urlPath === '/api/vram') {

@@ -9,16 +9,30 @@ $ErrorActionPreference = 'Stop'
 
 $speaker = New-Object -ComObject SAPI.SpVoice
 $allVoices = @()
+$voiceMeta = @()
 $vList = $speaker.GetVoices()
 for ($i = 0; $i -lt $vList.Count; $i++) {
     $v = $vList.Item($i)
-    $allVoices += [PSCustomObject]@{ Desc = $v.GetDescription(); Obj = $v }
+    $desc = $v.GetDescription()
+    $gender = ''
+    $lang = ''
+    try { $gender = $v.GetAttribute('Gender') } catch {}
+    try { $lang = $v.GetAttribute('Language') } catch {}
+    $allVoices += [PSCustomObject]@{ Desc = $desc; Obj = $v }
+    $voiceMeta += [PSCustomObject]@{ name = $desc; gender = $gender; lang = $lang }
 }
 
 function Select-SapiVoice([string]$query) {
     if ([string]::IsNullOrWhiteSpace($query)) { return $speaker.Voice }
+    $qLower = $query.ToLowerInvariant()
     foreach ($item in $allVoices) {
-        if ($item.Desc.ToLowerInvariant().Contains($query.ToLowerInvariant())) {
+        if ($item.Desc.ToLowerInvariant() -eq $qLower) {
+            $speaker.Voice = $item.Obj
+            return $item.Obj
+        }
+    }
+    foreach ($item in $allVoices) {
+        if ($item.Desc.ToLowerInvariant().Contains($qLower)) {
             $speaker.Voice = $item.Obj
             return $item.Obj
         }
@@ -42,7 +56,7 @@ foreach ($vName in @("Andrew (Natural HD)", "Jenny(Natural)")) {
     } catch {}
 }
 
-$readyObj = @{ ready = $true; voiceCount = $allVoices.Count } | ConvertTo-Json -Compress
+$readyObj = @{ ready = $true; voiceCount = $allVoices.Count; voices = $voiceMeta } | ConvertTo-Json -Compress -Depth 4
 [Console]::Out.WriteLine($readyObj)
 [Console]::Out.Flush()
 

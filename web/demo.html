@@ -192,12 +192,13 @@
           </label>
           <label style="font-size:12px; color:#8b949e; display:inline-flex; align-items:center; gap:5px;">
             SAPI:
-            <select id="voiceSelect">
+            <select id="voiceSelect" style="max-width:220px;">
               <option value="Andrew (Natural HD)">Andrew HD (Puck)</option>
               <option value="Jenny(Natural)">Jenny (Gretchen)</option>
               <option value="Aria (Natural)">Aria</option>
               <option value="Ryan (Natural)">Ryan UK</option>
             </select>
+            <button id="btnPreviewVoice" title="Preview selected SAPI voice" style="padding:4px 8px; font-size:12px;">🔊</button>
           </label>
         </div>
       </div>
@@ -297,6 +298,7 @@
     const precisionSelectEl = document.getElementById('precisionSelect');
     const mRendLabelEl = document.getElementById('mRendLabel');
     const voiceSelectEl = document.getElementById('voiceSelect');
+    const btnPreviewVoice = document.getElementById('btnPreviewVoice');
     const llmPillEl = document.getElementById('llmPill');
     const btnDownloadNano = document.getElementById('btnDownloadNano');
     const memHudEl = document.getElementById('memHud');
@@ -1027,11 +1029,121 @@
       return { name, t_r, gpuTensors, srcImgGpu, portraitImg: img };
     }
 
+    function matchVoiceOption(query) {
+      if (!query) return '';
+      const q = query.toLowerCase();
+      const opts = Array.from(voiceSelectEl.options);
+      const exact = opts.find(o => o.value.toLowerCase() === q);
+      if (exact) return exact.value;
+      const partial = opts.find(o => o.value.toLowerCase().includes(q));
+      return partial ? partial.value : '';
+    }
+
+    async function loadAllSapiVoices() {
+      try {
+        const r = await fetch('/api/voices');
+        if (!r.ok) return;
+        const data = await r.json();
+        const voices = Array.isArray(data.voices) ? data.voices : [];
+        if (!voices.length) return;
+
+        // Group voices cleanly: Natural HD / Natural / Standard SAPI
+        const naturalHd = [];
+        const natural = [];
+        const standard = [];
+        for (const v of voices) {
+          const name = String(v.name || '').trim();
+          if (!name) continue;
+          const lower = name.toLowerCase();
+          if (lower.includes('natural hd') || lower.includes('multilingual') || lower.includes('dragon')) {
+            naturalHd.push(v);
+          } else if (lower.includes('natural') || lower.includes('neural')) {
+            natural.push(v);
+          } else {
+            standard.push(v);
+          }
+        }
+        const byName = (a, b) => a.name.localeCompare(b.name);
+        naturalHd.sort(byName);
+        natural.sort(byName);
+        standard.sort(byName);
+
+        voiceSelectEl.innerHTML = '';
+        const addGroup = (label, list) => {
+          if (!list.length) return;
+          const og = document.createElement('optgroup');
+          og.label = `${label} (${list.length})`;
+          for (const v of list) {
+            const opt = document.createElement('option');
+            opt.value = v.name;
+            const shortLabel = v.name.replace(/^Microsoft\s+/i, '');
+            const gTag = v.gender ? ` · ${v.gender[0]}` : '';
+            opt.textContent = `${shortLabel}${gTag}`;
+            og.appendChild(opt);
+          }
+          voiceSelectEl.appendChild(og);
+        };
+        addGroup('Natural HD / Neural', naturalHd);
+        addGroup('Natural', natural);
+        addGroup('Standard SAPI', standard);
+
+        // Restore saved per-avatar voices or resolve defaults against full SAPI list
+        for (const key of ['puck', 'gretchen']) {
+          const saved = localStorage.getItem(`chrome_avatar_voice_${key}`);
+          const matched = matchVoiceOption(saved || PERSONAS[key].voice);
+          if (matched) PERSONAS[key].voice = matched;
+        }
+        const activeMatch = matchVoiceOption(PERSONAS[activeAvatarName].voice);
+        if (activeMatch) voiceSelectEl.value = activeMatch;
+        log(`🔊 Exposed all ${voices.length} Windows SAPI voices (Puck: ${PERSONAS.puck.voice} | Gretchen: ${PERSONAS.gretchen.voice})`);
+      } catch (e) {
+        log(`⚠️ Could not fetch /api/voices: ${e.message}`);
+      }
+    }
+
+    async function previewSelectedVoice() {
+      const voice = voiceSelectEl.value || PERSONAS[activeAvatarName].voice;
+      const sampleLine = activeAvatarName === 'gretchen'
+        ? "Hi, I'm Gretchen! Testing this Windows voice."
+        : "Hey, I'm Puck! Testing this Windows voice.";
+      btnPreviewVoice.disabled = true;
+      try {
+        const resp = await fetch('/api/tts', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ text: sampleLine, avatar: activeAvatarName, voice }),
+        });
+        if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+        const wavBuf = await resp.arrayBuffer();
+        const actx = new (window.AudioContext || window.webkitAudioContext)();
+        const decoded = await actx.decodeAudioData(wavBuf.slice(0));
+        const src = actx.createBufferSource();
+        src.buffer = decoded;
+        src.connect(actx.destination);
+        src.onended = () => actx.close().catch(() => {});
+        src.start();
+      } catch (e) {
+        log(`⚠️ Voice preview failed: ${e.message}`);
+      } finally {
+        btnPreviewVoice.disabled = false;
+      }
+    }
+
+    voiceSelectEl.onchange = () => {
+      const chosen = voiceSelectEl.value;
+      if (!chosen) return;
+      PERSONAS[activeAvatarName].voice = chosen;
+      try { localStorage.setItem(`chrome_avatar_voice_${activeAvatarName}`, chosen); } catch {}
+      log(`🔊 ${PERSONAS[activeAvatarName].name} voice set to: ${chosen}`);
+    };
+    btnPreviewVoice.onclick = () => previewSelectedVoice();
+
     function selectAvatar(name) {
       activeAvatarName = name;
       btnPuck.classList.toggle('active', name === 'puck');
       btnGretchen.classList.toggle('active', name === 'gretchen');
-      voiceSelectEl.value = PERSONAS[name].voice;
+      const matched = matchVoiceOption(PERSONAS[name].voice);
+      if (matched) voiceSelectEl.value = matched;
       if (avatars[name]?.portraitImg) ctx.drawImage(avatars[name].portraitImg, 0, 0, 512, 512);
     }
 
@@ -1611,6 +1723,7 @@
         badgeEl.textContent = 'Loading avatars…';
         avatars.puck = await loadAvatarCache('puck');
         avatars.gretchen = await loadAvatarCache('gretchen');
+        await loadAllSapiVoices();
         selectAvatar('puck');
 
         badgeEl.textContent = `Compiling all 3 WebGPU models (${gpuPrecision.toUpperCase()})…`;

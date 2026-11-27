@@ -2,9 +2,12 @@ package com.pixelavatar.app
 
 import android.app.ActivityManager
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.graphics.Bitmap
 import android.media.AudioAttributes
+import android.media.AudioFocusRequest
 import android.media.AudioFormat
+import android.media.AudioManager
 import android.media.AudioTimestamp
 import android.media.AudioTrack
 import android.os.Bundle
@@ -56,13 +59,18 @@ class MainActivity : ComponentActivity() {
      * Tracks the exact acoustic playback time exiting the physical speaker / Bluetooth DAC
      * with sub-millisecond accuracy and zero cumulative drift over long utterances.
      */
-    private class HardwareAudioPlayer(private val audio: TtsAudio) {
+    private class HardwareAudioPlayer(
+        private val audio: TtsAudio,
+        private val audioManager: AudioManager?,
+        private val isAutomotive: Boolean,
+    ) {
         val sampleRate: Int = audio.rawSampleRate
         val totalFrames: Long = audio.rawTotalFrames.toLong()
         val durationMs: Double = audio.durationSec * 1000.0
 
         val track: AudioTrack
         private val ts = AudioTimestamp()
+        private var focusRequest: AudioFocusRequest? = null
         @Volatile var finished: Boolean = false
             private set
 
@@ -80,13 +88,19 @@ class MainActivity : ComponentActivity() {
                 AudioFormat.ENCODING_PCM_16BIT,
             ).coerceAtLeast(4096)
             val bufBytes = maxOf(minBuf * 2, sampleRate * 2 / 5) // ~200 ms low-latency ring buffer
+            val attrs = AudioAttributes.Builder()
+                .setUsage(if (isAutomotive) AudioAttributes.USAGE_ASSISTANT else AudioAttributes.USAGE_MEDIA)
+                .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
+                .build()
+            if (isAutomotive && audioManager != null) {
+                val req = AudioFocusRequest.Builder(AudioManager.AUDIOFOCUS_GAIN_TRANSIENT_MAY_DUCK)
+                    .setAudioAttributes(attrs)
+                    .build()
+                focusRequest = req
+                runCatching { audioManager?.requestAudioFocus(req) }
+            }
             track = AudioTrack.Builder()
-                .setAudioAttributes(
-                    AudioAttributes.Builder()
-                        .setUsage(AudioAttributes.USAGE_MEDIA)
-                        .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
-                        .build()
-                )
+                .setAudioAttributes(attrs)
                 .setAudioFormat(
                     AudioFormat.Builder()
                         .setEncoding(AudioFormat.ENCODING_PCM_16BIT)
@@ -178,6 +192,8 @@ class MainActivity : ComponentActivity() {
             runCatching { track.flush() }
             runCatching { track.stop() }
             runCatching { track.release() }
+            focusRequest?.let { req -> runCatching { audioManager?.abandonAudioFocusRequest(req) } }
+            focusRequest = null
         }
     }
 
@@ -241,7 +257,18 @@ class MainActivity : ComponentActivity() {
         var voiceLabel by remember { mutableStateOf("tpd") }
         var puckVoiceShort by remember { mutableStateOf("tpd") }
         var gretchenVoiceShort by remember { mutableStateOf("iog") }
-        var useStudioUi by remember { mutableStateOf(true) }
+        val isAutomotiveDevice = remember {
+            packageManager.hasSystemFeature(PackageManager.FEATURE_AUTOMOTIVE)
+        }
+        val audioManager = remember {
+            getSystemService(AUDIO_SERVICE) as? AudioManager
+        }
+        val screenConfig = androidx.compose.ui.platform.LocalConfiguration.current
+        // 0 = Flagship Studio (phone), 1 = Classic Console, 2 = Auto Cockpit (AAOS / widescreen)
+        var uiMode by remember {
+            mutableIntStateOf(if (isAutomotiveDevice || screenConfig.screenWidthDp >= 720) 2 else 0)
+        }
+        var isDrivingMode by remember { mutableStateOf(false) }
         var studyDeck by remember { mutableStateOf(StudyGuideParser.loadBundledSolarSystem(this@MainActivity)) }
         var quizActive by remember { mutableStateOf(false) }
         var quizCardIdx by remember { mutableIntStateOf(0) }
@@ -487,7 +514,7 @@ class MainActivity : ComponentActivity() {
                 // Present Frame 0 immediately before hardware audio starts
                 renderedFrames[0]?.let { frameBmp = it; frameVersion++ }
                 statusBadge = "Speaking (${avatar.displayName} · $fpsLabel)"
-                val player = HardwareAudioPlayer(ttsAudio)
+                val player = HardwareAudioPlayer(ttsAudio, audioManager, isAutomotiveDevice || uiMode == 2)
                 activeAudioTrack = player.track
                 var shown = 0
                 try {
@@ -544,7 +571,7 @@ class MainActivity : ComponentActivity() {
                 frameVersion++
 
                 statusBadge = "Speaking (${avatar.displayName})"
-                val player = HardwareAudioPlayer(ttsAudio)
+                val player = HardwareAudioPlayer(ttsAudio, audioManager, isAutomotiveDevice || uiMode == 2)
                 activeAudioTrack = player.track
                 var rendered = 1
                 var sumRendMs = emaRendMs
@@ -1049,50 +1076,97 @@ class MainActivity : ComponentActivity() {
         val accent = Color(0xFF58A6FF)
         val green = Color(0xFF3FB950)
 
-        if (useStudioUi) {
+        val studioState = StudioUiState(
+            ready = ready,
+            busy = busy,
+            preferGpu = preferGpu,
+            playbackMode = playbackMode,
+            activeAvatar = activeAvatar,
+            puckVoiceShort = puckVoiceShort,
+            gretchenVoiceShort = gretchenVoiceShort,
+            demoTopic = demoTopic,
+            defaultDemoTopic = defaultDemoTopic,
+            xShowcaseTopic = xShowcaseTopic,
+            statusBadge = statusBadge,
+            nanoReady = nanoLlm.isReady,
+            nanoBadge = nanoBadge,
+            inputText = inputText,
+            logText = logText,
+            memMain = memMain,
+            memSub = memSub,
+            metricLlm = metricLlm,
+            metricTts = metricTts,
+            metricMotion = metricMotion,
+            metricRend = metricRend,
+            renderSide = pipeline.renderSide,
+            acceleratorLabel = pipeline.activeAcceleratorLabel,
+            frameBmp = frameBmp,
+            frameVersion = frameVersion,
+            chatHistory = chatHistory,
+            chatListState = chatListState,
+            quiz = QuizUiSnapshot(
+                active = quizActive,
+                deckTitle = studyDeck.title,
+                cardIndex = quizCardIdx,
+                totalCards = studyDeck.cards.size,
+                currentTopic = studyDeck.cards.getOrNull(quizCardIdx)?.topic ?: "",
+                masteredCount = quizMastered,
+                awaitingAnswer = quizAwaitingAnswer,
+                retryCount = quizRetryCount,
+                completed = quizCompleted,
+            ),
+            gmailAccessGranted = gmailAccessGranted,
+            gmailCachedCount = gmailCachedCount,
+        )
+
+        val launchMic: () -> Unit = {
+            val intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
+                putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
+                putExtra(RecognizerIntent.EXTRA_PROMPT, "Ask Puck or Gretchen…")
+            }
+            runCatching { voiceLauncher.launch(intent) }
+        }
+
+        val cycleAvatarVoice: (String) -> Unit = { avatarKey ->
+            val short = ttsEngine.cycleVoice(avatarKey)
+            if (avatarKey == "gretchen") gretchenVoiceShort = short else puckVoiceShort = short
+            if (avatarKey == activeAvatar) voiceLabel = short
+            ttsEngine.previewCurrentVoice(avatarKey)
+        }
+
+        if (uiMode == 2) {
+            AutomotiveCockpitUi(
+                state = studioState,
+                isDriving = isDrivingMode,
+                onToggleDriving = { isDrivingMode = !isDrivingMode },
+                onSelectAvatar = { selectAvatar(it) },
+                onPushToTalk = launchMic,
+                onRunThreeTurnDemo = {
+                    if (quizActive) endStudyQuiz()
+                    runThreeTurnDemo()
+                },
+                onStartStudyQuiz = { startStudyQuiz() },
+                onEndStudyQuiz = { endStudyQuiz() },
+                onSkipQuizCard = { skipQuizCard() },
+                onReadLastEmail = { readGmailBrief("Read my last email") },
+                onQuickAsk = { sendQuestion(it) },
+                onStop = { stopActivePlayback() },
+                onCycleVoice = cycleAvatarVoice,
+                onPreferGpuChange = { gpu ->
+                    if (!busy) {
+                        preferGpu = gpu
+                        uiScope.launch { bootPipeline(gpu) }
+                    }
+                },
+                onRefreshMem = { refreshMem() },
+                onSwitchUiMode = { uiMode = it },
+            )
+            return
+        }
+
+        if (uiMode == 0) {
             StudioUiV2(
-                state = StudioUiState(
-                    ready = ready,
-                    busy = busy,
-                    preferGpu = preferGpu,
-                    playbackMode = playbackMode,
-                    activeAvatar = activeAvatar,
-                    puckVoiceShort = puckVoiceShort,
-                    gretchenVoiceShort = gretchenVoiceShort,
-                    demoTopic = demoTopic,
-                    defaultDemoTopic = defaultDemoTopic,
-                    xShowcaseTopic = xShowcaseTopic,
-                    statusBadge = statusBadge,
-                    nanoReady = nanoLlm.isReady,
-                    nanoBadge = nanoBadge,
-                    inputText = inputText,
-                    logText = logText,
-                    memMain = memMain,
-                    memSub = memSub,
-                    metricLlm = metricLlm,
-                    metricTts = metricTts,
-                    metricMotion = metricMotion,
-                    metricRend = metricRend,
-                    renderSide = pipeline.renderSide,
-                    acceleratorLabel = pipeline.activeAcceleratorLabel,
-                    frameBmp = frameBmp,
-                    frameVersion = frameVersion,
-                    chatHistory = chatHistory,
-                    chatListState = chatListState,
-                    quiz = QuizUiSnapshot(
-                        active = quizActive,
-                        deckTitle = studyDeck.title,
-                        cardIndex = quizCardIdx,
-                        totalCards = studyDeck.cards.size,
-                        currentTopic = studyDeck.cards.getOrNull(quizCardIdx)?.topic ?: "",
-                        masteredCount = quizMastered,
-                        awaitingAnswer = quizAwaitingAnswer,
-                        retryCount = quizRetryCount,
-                        completed = quizCompleted,
-                    ),
-                    gmailAccessGranted = gmailAccessGranted,
-                    gmailCachedCount = gmailCachedCount,
-                ),
+                state = studioState,
                 onSelectAvatar = { selectAvatar(it) },
                 onRunThreeTurnDemo = {
                     if (quizActive) endStudyQuiz()
@@ -1110,19 +1184,8 @@ class MainActivity : ComponentActivity() {
                 onStop = { stopActivePlayback() },
                 onInputChange = { inputText = it },
                 onSendQuestion = { sendQuestion(it) },
-                onMicClick = {
-                    val intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
-                        putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
-                        putExtra(RecognizerIntent.EXTRA_PROMPT, "Ask Puck or Gretchen…")
-                    }
-                    runCatching { voiceLauncher.launch(intent) }
-                },
-                onCycleVoice = { avatarKey ->
-                    val short = ttsEngine.cycleVoice(avatarKey)
-                    if (avatarKey == "gretchen") gretchenVoiceShort = short else puckVoiceShort = short
-                    if (avatarKey == activeAvatar) voiceLabel = short
-                    ttsEngine.previewCurrentVoice(avatarKey)
-                },
+                onMicClick = launchMic,
+                onCycleVoice = cycleAvatarVoice,
                 onPlaybackModeChange = { playbackMode = it },
                 onPreferGpuChange = { gpu ->
                     if (!busy) {
@@ -1135,7 +1198,8 @@ class MainActivity : ComponentActivity() {
                     if (runNow && ready && !busy) runThreeTurnDemo()
                 },
                 onRefreshMem = { refreshMem() },
-                onSwitchToClassic = { useStudioUi = false },
+                onSwitchToClassic = { uiMode = 1 },
+                onSwitchToAutoCockpit = { uiMode = 2 },
             )
             return
         }
@@ -1169,7 +1233,7 @@ class MainActivity : ComponentActivity() {
                                 modifier = Modifier
                                     .clip(RoundedCornerShape(999.dp))
                                     .background(Color(0xFF1F6FEB))
-                                    .clickable { useStudioUi = true }
+                                    .clickable { uiMode = 0 }
                                     .padding(horizontal = 8.dp, vertical = 3.dp),
                             )
                         }

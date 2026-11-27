@@ -108,6 +108,7 @@ fun StudioUiV2(
     onDemoTopicSave: (String, Boolean) -> Unit,
     onRefreshMem: () -> Unit,
     onSwitchToClassic: () -> Unit,
+    onSwitchToAutoCockpit: () -> Unit = {},
 ) {
     // Flagship surface palette: deep obsidian canvas + elevated dark slate surfaces, zero 1px borders
     val bgCanvas = Color(0xFF0D1117)
@@ -818,7 +819,7 @@ fun StudioUiV2(
             ) {
                 Text("Studio Settings", fontSize = 17.sp, fontWeight = FontWeight.SemiBold, color = textPrimary)
 
-                // Interface Version Switcher (Flagship Studio v2 <-> Classic Console v1)
+                // Interface Version Switcher (Flagship Studio v2 <-> Auto Cockpit <-> Classic Console v1)
                 Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
                     Text("Interface Layout", color = textSecondary, fontSize = 12.sp, fontWeight = FontWeight.Medium)
                     Row(
@@ -838,7 +839,20 @@ fun StudioUiV2(
                                 .background(primaryBlue),
                             contentAlignment = Alignment.Center,
                         ) {
-                            Text("Flagship Studio", color = Color.White, fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
+                            Text("Studio", color = Color.White, fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
+                        }
+                        Box(
+                            modifier = Modifier
+                                .weight(1f)
+                                .fillMaxHeight()
+                                .clip(RoundedCornerShape(10.dp))
+                                .clickable {
+                                    showSettingsSheet = false
+                                    onSwitchToAutoCockpit()
+                                },
+                            contentAlignment = Alignment.Center,
+                        ) {
+                            Text("Auto Cockpit", color = textSecondary, fontSize = 12.sp, fontWeight = FontWeight.Medium)
                         }
                         Box(
                             modifier = Modifier
@@ -851,7 +865,7 @@ fun StudioUiV2(
                                 },
                             contentAlignment = Alignment.Center,
                         ) {
-                            Text("Classic Console", color = textSecondary, fontSize = 12.sp, fontWeight = FontWeight.Medium)
+                            Text("Console", color = textSecondary, fontSize = 12.sp, fontWeight = FontWeight.Medium)
                         }
                     }
                 }

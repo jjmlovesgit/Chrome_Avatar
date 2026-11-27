@@ -183,34 +183,41 @@ class AvatarPipeline(private val context: Context) {
             storage: CompiledModel.GpuOptions.BufferStorageType = CompiledModel.GpuOptions.BufferStorageType.DEFAULT,
             texWeights: Boolean = false,
             cacheKey: String = "model",
+            constantTensorSharing: Boolean = true,
+            serializeCache: Boolean = true,
         ): CompiledModel.Options {
             val opts = CompiledModel.Options(Accelerator.GPU)
             opts.gpuOptions = CompiledModel.GpuOptions(
-                constantTensorSharing = true,
+                constantTensorSharing = constantTensorSharing,
                 allowSrcQuantizedFcConvOps = true,
                 precision = CompiledModel.GpuOptions.Precision.FP16,
                 bufferStorageType = storage,
                 preferTextureWeights = texWeights,
-                serializationDir = cacheDir,
-                modelCacheKey = cacheKey,
-                serializeProgramCache = true,
+                serializationDir = if (serializeCache) cacheDir else null,
+                modelCacheKey = if (serializeCache) cacheKey else null,
+                serializeProgramCache = serializeCache,
                 backend = backend,
                 priority = CompiledModel.GpuOptions.Priority.HIGH,
             )
             return opts
         }
 
-        fun compileOne(name: String, opts: CompiledModel.Options, label: String): Pair<CompiledModel, String> {
+        fun compileOne(
+            name: String,
+            gpuCandidates: List<Pair<String, CompiledModel.Options>>,
+        ): Pair<CompiledModel, String> {
             val path = File(dir, name).absolutePath
             if (preferGpu) {
-                try {
-                    val t0 = System.nanoTime()
-                    val m = CompiledModel.create(path, opts, environment)
-                    val ms = (System.nanoTime() - t0) / 1e6
-                    onLog("  [$label] $name compiled (${"%.0f".format(ms)} ms)")
-                    return m to label
-                } catch (e: Throwable) {
-                    onLog("  [$label fallback->CPU] $name: ${e.message}")
+                for ((label, opts) in gpuCandidates) {
+                    try {
+                        val t0 = System.nanoTime()
+                        val m = CompiledModel.create(path, opts, environment)
+                        val ms = (System.nanoTime() - t0) / 1e6
+                        onLog("  [$label] $name compiled (${"%.0f".format(ms)} ms)")
+                        return m to label
+                    } catch (e: Throwable) {
+                        onLog("  [$label fallback] $name: ${e.message?.take(100)}")
+                    }
                 }
             }
             val t0 = System.nanoTime()
@@ -222,44 +229,50 @@ class AvatarPipeline(private val context: Context) {
 
         val (mW2v, accW2v) = compileOne(
             MODEL_W2V,
-            makeGpuOpts(cacheKey = "w2v_fp16"),
-            "GPU-FP16",
+            listOf(
+                "GPU-FP16" to makeGpuOpts(cacheKey = "w2v_fp16"),
+                "GL-FP16" to makeGpuOpts(
+                    backend = CompiledModel.GpuOptions.Backend.OPENGL,
+                    cacheKey = "w2v_gl",
+                    constantTensorSharing = false,
+                    serializeCache = false,
+                ),
+            ),
         )
         val (mFm, accFm) = compileOne(
             MODEL_FM,
-            makeGpuOpts(cacheKey = "fm_fp16"),
-            "GPU-FP16",
+            listOf(
+                "GPU-FP16" to makeGpuOpts(cacheKey = "fm_fp16"),
+                "GL-FP16" to makeGpuOpts(
+                    backend = CompiledModel.GpuOptions.Backend.OPENGL,
+                    cacheKey = "fm_gl",
+                    constantTensorSharing = false,
+                    serializeCache = false,
+                ),
+            ),
         )
 
-        // Lock directly to Pixel 10's fastest proven backend: WGPU-FP16 (Vulkan) -> CL-FP16-TEX -> CPU
+        // Fastest proven GPU chain: WGPU-FP16 (Vulkan) -> CL-FP16-TEX (OpenCL) -> GL-FP16 (OpenGL ES) -> CPU
         val rendFile = resolveRendererFile()
         val rendName = rendFile.name
         val rendCacheTag = "${rendFile.length()}_${rendFile.lastModified()}"
-        if (preferGpu) {
-            val wgpuOpts = makeGpuOpts(CompiledModel.GpuOptions.Backend.WEBGPU, CompiledModel.GpuOptions.BufferStorageType.DEFAULT, false, "rend_wgpu_$rendCacheTag")
-            val clTexOpts = makeGpuOpts(CompiledModel.GpuOptions.Backend.OPENCL, CompiledModel.GpuOptions.BufferStorageType.TEXTURE_2D, true, "rend_cltex_$rendCacheTag")
-            val rendPath = rendFile.absolutePath
-            var compiled: Pair<CompiledModel, String>? = null
-            for ((label, opts) in listOf("WGPU-FP16" to wgpuOpts, "CL-FP16-TEX" to clTexOpts)) {
-                try {
-                    val t0 = System.nanoTime()
-                    val m = CompiledModel.create(rendPath, opts, environment)
-                    val ms = (System.nanoTime() - t0) / 1e6
-                    onLog("  [$label] $rendName compiled (${"%.0f".format(ms)} ms)")
-                    compiled = m to label
-                    break
-                } catch (e: Throwable) {
-                    onLog("  [$label fallback] $rendName: ${e.message?.take(100)}")
-                }
-            }
-            val (mRend, accRend) = compiled ?: compileOne(rendName, CompiledModel.Options(Accelerator.CPU), "CPU")
-            w2vModel = mW2v; fmModel = mFm; rendModel = mRend
-            activeAcceleratorLabel = accRend
-        } else {
-            val (mRend, accRend) = compileOne(rendName, CompiledModel.Options(Accelerator.CPU), "CPU")
-            w2vModel = mW2v; fmModel = mFm; rendModel = mRend
-            activeAcceleratorLabel = accRend
-        }
+        val (mRend, accRend) = compileOne(
+            rendName,
+            listOf(
+                "WGPU-FP16" to makeGpuOpts(CompiledModel.GpuOptions.Backend.WEBGPU, CompiledModel.GpuOptions.BufferStorageType.DEFAULT, false, "rend_wgpu_$rendCacheTag"),
+                "CL-FP16-TEX" to makeGpuOpts(CompiledModel.GpuOptions.Backend.OPENCL, CompiledModel.GpuOptions.BufferStorageType.TEXTURE_2D, true, "rend_cltex_$rendCacheTag"),
+                "GL-FP16" to makeGpuOpts(
+                    backend = CompiledModel.GpuOptions.Backend.OPENGL,
+                    storage = CompiledModel.GpuOptions.BufferStorageType.DEFAULT,
+                    texWeights = false,
+                    cacheKey = "rend_gl_$rendCacheTag",
+                    constantTensorSharing = false,
+                    serializeCache = false,
+                ),
+            ),
+        )
+        w2vModel = mW2v; fmModel = mFm; rendModel = mRend
+        activeAcceleratorLabel = accRend
 
         onLog("Active winner: w2v=$accW2v, fm=$accFm, renderer=$activeAcceleratorLabel")
 

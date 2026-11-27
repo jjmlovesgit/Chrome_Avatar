@@ -53,6 +53,8 @@ class NanoLlmClient(private val context: Context) {
         private set
     var usingLiteRtLm: Boolean = false
         private set
+    var usingCpuLlm: Boolean = false
+        private set
 
     suspend fun prepare(
         preferGpu: Boolean = true,
@@ -155,7 +157,8 @@ class NanoLlmClient(private val context: Context) {
         litertEngine = null
 
         val cacheDir = File(context.cacheDir, "litertlm_cache").apply { mkdirs() }
-        val cpuThreads = Runtime.getRuntime().availableProcessors().coerceIn(2, 6)
+        // Leave at least 1 core free for AudioFlinger & UI so audio never underruns
+        val cpuThreads = (Runtime.getRuntime().availableProcessors() - 1).coerceIn(2, 4)
         val candidates: List<Pair<String, Backend>> = if (preferGpu) {
             listOf("GPU" to Backend.GPU(), "CPU" to Backend.CPU(threadCount = cpuThreads))
         } else {
@@ -179,6 +182,7 @@ class NanoLlmClient(private val context: Context) {
                 litertEngine = eng
                 isReady = true
                 usingLiteRtLm = true
+                usingCpuLlm = (label == "CPU")
                 activeEngineShort = "LiteRT-LM Qwen3 ($label)"
                 statusLabel = "Qwen3-0.6B ($label)"
                 onStatus("LiteRT-LM Qwen3-0.6B initialized on $label (${"%.0f".format(ms)} ms) — 100% offline LLM ready!")
@@ -258,13 +262,38 @@ class NanoLlmClient(private val context: Context) {
         }
     }
 
+    private fun stripNonTextChars(s: String): String {
+        val sb = StringBuilder(s.length)
+        var i = 0
+        while (i < s.length) {
+            val cp = s.codePointAt(i)
+            val charCount = Character.charCount(cp)
+            val keep = when {
+                // Standard ASCII letters, digits, space, and clean spoken punctuation (no *, _, `, #, ~, emojis)
+                cp in 0x20..0x7E -> {
+                    val ch = cp.toChar()
+                    ch != '*' && ch != '_' && ch != '`' && ch != '#' && ch != '~' && ch != '^'
+                }
+                // Smart quotes / dashes / ellipsis / degree / basic accented Latin letters
+                cp == 0x2018 || cp == 0x2019 -> true // ‘ ’
+                cp == 0x201C || cp == 0x201D -> true // “ ”
+                cp == 0x2013 || cp == 0x2014 -> true // – —
+                cp == 0x2026 || cp == 0x00B0 -> true // … °
+                cp in 0x00C0..0x024F -> Character.isLetter(cp) // accented Latin letters
+                else -> false // strips ALL emojis, pictographs, dingbats, variation selectors, ZWJ, etc.
+            }
+            if (keep) sb.appendCodePoint(cp)
+            i += charCount
+        }
+        return sb.toString()
+    }
+
     private fun cleanReply(raw: String, personaName: String): String {
-        // Strip any Qwen3 <think>...</think> blocks cleanly before TTS
+        // Strip any Qwen3 <think>...</think> blocks and ALL emojis/non-text symbols cleanly before UI & TTS
         var reply = raw
             .replace(Regex("<think>[\\s\\S]*?</think>", RegexOption.IGNORE_CASE), "")
             .replace(Regex("<think>[\\s\\S]*$", RegexOption.IGNORE_CASE), "")
-            .replace(Regex("[*_`#]"), "")
-            .trim()
+        reply = stripNonTextChars(reply).trim()
         val ownTag = Regex("(?:^|\\n)\\s*(?:\\[?$personaName\\]?)\\s*:\\s*([\\s\\S]+)$", RegexOption.IGNORE_CASE)
         ownTag.find(reply)?.groupValues?.getOrNull(1)?.trim()?.takeIf { it.length > 8 }?.let { reply = it }
         reply = reply
@@ -272,6 +301,13 @@ class NanoLlmClient(private val context: Context) {
             .replace(Regex("^\\s*(?:Puck|Gretchen)\\s*:\\s*", RegexOption.IGNORE_CASE), "")
             .replace(Regex("\\s+"), " ")
             .trim()
+        // Strip outer wrapping quotes if model wrapped the entire spoken reply in quotes
+        if (reply.length >= 2 &&
+            ((reply.startsWith("\"") && reply.endsWith("\"")) ||
+                (reply.startsWith("\u201C") && reply.endsWith("\u201D")))
+        ) {
+            reply = reply.substring(1, reply.length - 1).trim()
+        }
         return reply
     }
 
@@ -291,7 +327,7 @@ class NanoLlmClient(private val context: Context) {
         val recent = history.filter { it.speaker != "System" }.takeLast(4)
 
         if (usingLiteRtLm && litertEngine != null) {
-            val sysInst = "$personaDesc Reply in 1 to 2 short spoken sentences (under 28 words). Plain conversational text only—no markdown, bullet points, or speaker labels."
+            val sysInst = "$personaDesc Reply in 1 to 2 short spoken sentences (under 28 words). Use plain ASCII text characters only—never use emojis, icons, quotation marks, bullet points, or markdown."
             val userMsg = buildString {
                 if (recent.isNotEmpty()) {
                     append("Recent conversation:\n")

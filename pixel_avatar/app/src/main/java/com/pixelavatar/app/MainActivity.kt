@@ -58,9 +58,9 @@ class MainActivity : ComponentActivity() {
     private var speechRecognizer: SpeechRecognizer? = null
 
     // Dedicated single thread for LiteRT GPU/OpenGL ES inference so the EGLContext
-    // stays permanently bound to the exact thread that compiled the models.
+    // stays permanently bound to the exact thread that compiled the models (normal priority so AudioFlinger never starves).
     private val litertDispatcher = java.util.concurrent.Executors.newSingleThreadExecutor { r ->
-        Thread(r, "LiteRT-GPU-Thread").apply { priority = Thread.MAX_PRIORITY }
+        Thread(r, "LiteRT-GPU-Thread")
     }.asCoroutineDispatcher()
 
     /**
@@ -73,14 +73,15 @@ class MainActivity : ComponentActivity() {
         private val audioManager: AudioManager?,
         private val isAutomotive: Boolean,
     ) {
-        val sampleRate: Int = audio.rawSampleRate
+        val sampleRate: Int = audio.rawSampleRate // 48000 Hz native AudioFlinger HAL rate
         val totalFrames: Long = audio.rawTotalFrames.toLong()
         val durationMs: Double = audio.durationSec * 1000.0
-        // Pad 180 ms of trailing silence so AudioFlinger/AAOS never clips the final syllable
-        private val tailPadBytes: Int = ((sampleRate * 0.18).toInt().coerceAtLeast(1024)) * 2
+        // 48 kHz STEREO 16-bit = 4 bytes/frame; pad 180 ms trailing silence so the final syllable never clips
+        private val bytesPerFrame: Int = 4
+        private val tailPadBytes: Int = ((sampleRate * 0.18).toInt().coerceAtLeast(1024)) * bytesPerFrame
         private val paddedPcm: ByteArray = audio.pcmRawBytes + ByteArray(tailPadBytes)
-        private val totalPaddedFrames: Long = (paddedPcm.size / 2).toLong()
-        private val useStaticMode: Boolean = paddedPcm.size in 4..(2 * 1024 * 1024)
+        private val totalPaddedFrames: Long = (paddedPcm.size / bytesPerFrame).toLong()
+        private val useStaticMode: Boolean = paddedPcm.size in 4..(4 * 1024 * 1024)
 
         val track: AudioTrack
         private val ts = AudioTimestamp()
@@ -98,13 +99,13 @@ class MainActivity : ComponentActivity() {
         init {
             val minBuf = AudioTrack.getMinBufferSize(
                 sampleRate,
-                AudioFormat.CHANNEL_OUT_MONO,
+                AudioFormat.CHANNEL_OUT_STEREO,
                 AudioFormat.ENCODING_PCM_16BIT,
-            ).coerceAtLeast(8192)
+            ).coerceAtLeast(16384)
             val bufBytes = if (useStaticMode) {
                 paddedPcm.size
             } else {
-                maxOf(minBuf * 4, sampleRate * 2) // 1.0s ring buffer for long utterances
+                maxOf(minBuf * 4, sampleRate * bytesPerFrame) // 1.0s ring buffer for long utterances
             }
             val attrs = AudioAttributes.Builder()
                 .setUsage(if (isAutomotive) AudioAttributes.USAGE_ASSISTANT else AudioAttributes.USAGE_MEDIA)
@@ -123,7 +124,7 @@ class MainActivity : ComponentActivity() {
                     AudioFormat.Builder()
                         .setEncoding(AudioFormat.ENCODING_PCM_16BIT)
                         .setSampleRate(sampleRate)
-                        .setChannelMask(AudioFormat.CHANNEL_OUT_MONO)
+                        .setChannelMask(AudioFormat.CHANNEL_OUT_STEREO)
                         .build()
                 )
                 .setBufferSizeInBytes(bufBytes)
@@ -154,7 +155,7 @@ class MainActivity : ComponentActivity() {
                     }
                 }
             } else {
-                val prefill = minOf(paddedPcm.size, sampleRate) // 500 ms prefill
+                val prefill = minOf(paddedPcm.size, sampleRate * bytesPerFrame / 2) // 500 ms stereo prefill
                 var offset = if (prefill > 0) track.write(paddedPcm, 0, prefill).coerceAtLeast(0) else 0
                 playStartNano = System.nanoTime()
                 track.play()
@@ -1057,8 +1058,9 @@ class MainActivity : ComponentActivity() {
                         chatHistory[bubbleIdx] = ChatTurn(name, reply, speakerKey)
                         appendLog("[Turn ${idx + 1}/3 · $name] (${if (isScriptedShowcase) "script" else "${"%.0f".format(llmMs)}ms"}): $reply")
 
-                        // Kick off next turn's Gemini Nano + TTS right now in parallel while this turn speaks!
-                        if (idx + 1 < turns.size) {
+                        // Kick off next turn's LLM + TTS in parallel while this turn speaks ONLY when LLM runs on NPU/GPU
+                        // (on CPU-bound LLM devices/emulators, keep CPU free during speech so AudioFlinger has zero static/underruns!)
+                        if (idx + 1 < turns.size && (isScriptedShowcase || !nanoLlm.usingCpuLlm)) {
                             val (nextKey, nextCue) = turns[idx + 1]
                             val historySnap = chatHistory.toList()
                             prefetched = uiScope.async(Dispatchers.IO) {

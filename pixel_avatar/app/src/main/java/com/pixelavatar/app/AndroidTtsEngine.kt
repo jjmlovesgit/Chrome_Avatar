@@ -299,9 +299,20 @@ class AndroidTtsEngine(private val context: Context) {
             putString("com.google.android.tts:DisableVoiceFallback", "false")
         }
 
+        val cleanSpoken = buildString(text.length) {
+            var idx = 0
+            while (idx < text.length) {
+                val cp = text.codePointAt(idx)
+                if (cp in 0x20..0x7E || cp == 0x2018 || cp == 0x2019 || cp == 0x2013 || cp == 0x2014 || cp in 0x00C0..0x024F) {
+                    appendCodePoint(cp)
+                }
+                idx += Character.charCount(cp)
+            }
+        }.replace(Regex("\\s+"), " ").trim().ifBlank { "Hello!" }
+
         android.util.Log.i("PixelAvatar", "TTS synth [$avatarKey] voice=${voice?.name ?: "default"}")
         val t0 = System.nanoTime()
-        val res = engine.synthesizeToFile(text, params, outFile, uttId)
+        val res = engine.synthesizeToFile(cleanSpoken, params, outFile, uttId)
         require(res == TextToSpeech.SUCCESS) { "TTS synthesizeToFile returned $res" }
         val finished = done.await()
         val synthMs = (System.nanoTime() - t0) / 1e6
@@ -356,11 +367,6 @@ class AndroidTtsEngine(private val context: Context) {
         val bytesPerSample = (bitsPerSample / 8).coerceAtLeast(2)
         val totalFrames = dataSize / (channels * bytesPerSample)
         val mono = FloatArray(totalFrames)
-        val monoPcm16Bytes = ByteArray(totalFrames * 2)
-        val outBb = ByteBuffer.wrap(monoPcm16Bytes).order(ByteOrder.LITTLE_ENDIAN)
-        // Soft 6ms fade-in/out + -1.4 dB headroom prevents digital clipping in 24kHz->48kHz resamplers & clicks
-        val fadeFrames = (sampleRate * 0.006).toInt().coerceIn(1, (totalFrames / 4).coerceAtLeast(1))
-        val headroom = 0.85f
         for (i in 0 until totalFrames) {
             var acc = 0f
             for (c in 0 until channels) {
@@ -368,17 +374,34 @@ class AndroidTtsEngine(private val context: Context) {
                 val s = bb.getShort(off).toInt()
                 acc += s / 32768f
             }
-            val avg = acc / channels
-            mono[i] = avg
-            val env = when {
-                i < fadeFrames -> i.toFloat() / fadeFrames
-                i >= totalFrames - fadeFrames -> (totalFrames - 1 - i).toFloat() / fadeFrames
-                else -> 1f
-            }
-            val s16 = (avg * headroom * env * 32767f).toInt().coerceIn(-32768, 32767).toShort()
-            outBb.putShort(s16)
+            mono[i] = acc / channels
         }
         val durationSec = totalFrames.toDouble() / sampleRate.toDouble()
+
+        // Resample playback PCM cleanly to Android's native 48 kHz STEREO (matches AudioFlinger HAL directly
+        // with zero real-time AudioFlinger resampler load, soft 8ms fades, and -2 dB anti-clipping headroom)
+        val outSampleRate = 48000
+        val outFrames = (durationSec * outSampleRate).toInt().coerceAtLeast(1)
+        val stereoPcm16Bytes = ByteArray(outFrames * 4) // 2 channels * 2 bytes
+        val outBb = ByteBuffer.wrap(stereoPcm16Bytes).order(ByteOrder.LITTLE_ENDIAN)
+        val fadeFrames = (outSampleRate * 0.008).toInt().coerceIn(1, (outFrames / 4).coerceAtLeast(1))
+        val headroom = 0.78f
+        val srcRatio = sampleRate.toDouble() / outSampleRate.toDouble()
+        for (i in 0 until outFrames) {
+            val srcPos = i * srcRatio
+            val i0 = srcPos.toInt().coerceIn(0, totalFrames - 1)
+            val i1 = (i0 + 1).coerceIn(0, totalFrames - 1)
+            val frac = (srcPos - i0).toFloat()
+            val sample = mono[i0] * (1f - frac) + mono[i1] * frac
+            val env = when {
+                i < fadeFrames -> i.toFloat() / fadeFrames
+                i >= outFrames - fadeFrames -> (outFrames - 1 - i).toFloat() / fadeFrames
+                else -> 1f
+            }
+            val s16 = (sample * headroom * env * 32767f).toInt().coerceIn(-32768, 32767).toShort()
+            outBb.putShort(s16) // Left
+            outBb.putShort(s16) // Right
+        }
         val pcm16k = if (sampleRate == 16000) {
             mono
         } else {
@@ -397,9 +420,9 @@ class AndroidTtsEngine(private val context: Context) {
         return DecodedWav(
             pcm16k = pcm16k,
             durationSec = durationSec,
-            pcmRawBytes = monoPcm16Bytes,
-            rawSampleRate = sampleRate,
-            rawTotalFrames = totalFrames,
+            pcmRawBytes = stereoPcm16Bytes,
+            rawSampleRate = outSampleRate,
+            rawTotalFrames = outFrames,
         )
     }
 

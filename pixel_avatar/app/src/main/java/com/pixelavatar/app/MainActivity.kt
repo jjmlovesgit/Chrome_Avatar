@@ -76,10 +76,15 @@ class MainActivity : ComponentActivity() {
         val sampleRate: Int = audio.rawSampleRate // 48000 Hz native AudioFlinger HAL rate
         val totalFrames: Long = audio.rawTotalFrames.toLong()
         val durationMs: Double = audio.durationSec * 1000.0
-        // 48 kHz STEREO 16-bit = 4 bytes/frame; pad 180 ms trailing silence so the final syllable never clips
+        private val isEmulator: Boolean = android.os.Build.HARDWARE.contains("ranchu", ignoreCase = true) ||
+            android.os.Build.FINGERPRINT.contains("generic", ignoreCase = true)
+        // 48 kHz STEREO 16-bit = 4 bytes/frame
+        // Prepend 160 ms warm-up silence on AAOS/emulator so QEMU audio sink & CarAudio patch finish warming up before word 1
         private val bytesPerFrame: Int = 4
+        private val leadPadMs: Double = if (isAutomotive || isEmulator) 160.0 else 0.0
+        private val leadPadBytes: Int = if (leadPadMs > 0.0) ((sampleRate * (leadPadMs / 1000.0)).toInt()) * bytesPerFrame else 0
         private val tailPadBytes: Int = ((sampleRate * 0.18).toInt().coerceAtLeast(1024)) * bytesPerFrame
-        private val paddedPcm: ByteArray = audio.pcmRawBytes + ByteArray(tailPadBytes)
+        private val paddedPcm: ByteArray = ByteArray(leadPadBytes) + audio.pcmRawBytes + ByteArray(tailPadBytes)
         private val totalPaddedFrames: Long = (paddedPcm.size / bytesPerFrame).toLong()
         private val useStaticMode: Boolean = paddedPcm.size in 4..(4 * 1024 * 1024)
 
@@ -107,8 +112,6 @@ class MainActivity : ComponentActivity() {
             } else {
                 maxOf(minBuf * 4, sampleRate * bytesPerFrame) // 1.0s ring buffer for long utterances
             }
-            val isEmulator = android.os.Build.HARDWARE.contains("ranchu", ignoreCase = true) ||
-                android.os.Build.FINGERPRINT.contains("generic", ignoreCase = true)
             val attrs = AudioAttributes.Builder()
                 // On real AAOS cars use USAGE_ASSISTANT; on x86_64 emulator use USAGE_MEDIA to avoid bus2 SODA contention
                 .setUsage(if (isAutomotive && !isEmulator) AudioAttributes.USAGE_ASSISTANT else AudioAttributes.USAGE_MEDIA)
@@ -145,8 +148,8 @@ class MainActivity : ComponentActivity() {
 
                 writerJob = scope.launch(Dispatchers.IO) {
                     try {
-                        val minWaitMs = (durationMs + 100.0).toLong()
-                        val maxWaitMs = (durationMs + 700.0).toLong()
+                        val minWaitMs = (leadPadMs + durationMs + 100.0).toLong()
+                        val maxWaitMs = (leadPadMs + durationMs + 750.0).toLong()
                         while (isActive) {
                             val elapsedMs = (System.nanoTime() - playStartNano) / 1_000_000L
                             val head = track.playbackHeadPosition.toLong() and 0xFFFFFFFFL
@@ -173,8 +176,8 @@ class MainActivity : ComponentActivity() {
                             if (written <= 0) break
                             offset += written
                         }
-                        val minWaitMs = (durationMs + 100.0).toLong()
-                        val maxWaitMs = (durationMs + 700.0).toLong()
+                        val minWaitMs = (leadPadMs + durationMs + 100.0).toLong()
+                        val maxWaitMs = (leadPadMs + durationMs + 750.0).toLong()
                         while (isActive) {
                             val elapsedMs = (System.nanoTime() - playStartNano) / 1_000_000L
                             val head = track.playbackHeadPosition.toLong() and 0xFFFFFFFFL
@@ -210,11 +213,11 @@ class MainActivity : ComponentActivity() {
             val rawMs = if (hasHwTs) {
                 val dtSec = (nowNs - anchorNanoTime) / 1_000_000_000.0
                 val exactFrames = anchorFramePos + dtSec * sampleRate
-                (exactFrames / sampleRate) * 1000.0
+                (exactFrames / sampleRate) * 1000.0 - leadPadMs
             } else {
                 val head = track.playbackHeadPosition.toLong() and 0xFFFFFFFFL
                 if (head > 0L) {
-                    ((head.toDouble() / sampleRate) * 1000.0 - 45.0).coerceAtLeast(0.0)
+                    ((head.toDouble() / sampleRate) * 1000.0 - 45.0 - leadPadMs).coerceAtLeast(0.0)
                 } else {
                     0.0
                 }
@@ -1061,9 +1064,11 @@ class MainActivity : ComponentActivity() {
                         chatHistory[bubbleIdx] = ChatTurn(name, reply, speakerKey)
                         appendLog("[Turn ${idx + 1}/3 · $name] (${if (isScriptedShowcase) "script" else "${"%.0f".format(llmMs)}ms"}): $reply")
 
-                        // Kick off next turn's LLM + TTS in parallel while this turn speaks ONLY when LLM runs on NPU/GPU
-                        // (on CPU-bound LLM devices/emulators, keep CPU free during speech so AudioFlinger has zero static/underruns!)
-                        if (idx + 1 < turns.size && (isScriptedShowcase || !nanoLlm.usingCpuLlm)) {
+                        // Kick off next turn's LLM + TTS in parallel while this turn speaks ONLY on real NPU/GPU devices
+                        // (on emulator / CPU LLM, avoid concurrent TTS/LLM CPU bursts during Turn 1 audio warmup!)
+                        val onEmulator = android.os.Build.HARDWARE.contains("ranchu", ignoreCase = true) ||
+                            android.os.Build.FINGERPRINT.contains("generic", ignoreCase = true)
+                        if (idx + 1 < turns.size && !onEmulator && (isScriptedShowcase || !nanoLlm.usingCpuLlm)) {
                             val (nextKey, nextCue) = turns[idx + 1]
                             val historySnap = chatHistory.toList()
                             prefetched = uiScope.async(Dispatchers.IO) {
@@ -1156,7 +1161,7 @@ class MainActivity : ComponentActivity() {
                         else -> "Speech recognizer error ($error)."
                     }
                     appendLog("Mic error ($error, peakRms=${"%.1f".format(peakRms)}): $msg")
-                    if (error != SpeechRecognizer.ERROR_CLIENT) {
+                    if (error != SpeechRecognizer.ERROR_CLIENT && error != SpeechRecognizer.ERROR_SERVER_DISCONNECTED) {
                         chatHistory.add(ChatTurn("System", msg))
                         uiScope.launch { runCatching { chatListState.animateScrollToItem(chatHistory.lastIndex) } }
                     }

@@ -86,6 +86,7 @@ data class StudioUiState(
     val gmailCachedCount: Int = 0,
     val isListening: Boolean = false,
     val listeningPartial: String = "",
+    val micRmsDb: Float = 0f,
 )
 
 @OptIn(ExperimentalMaterial3Api::class)

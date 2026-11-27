@@ -12,6 +12,11 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.BasicTextField
+import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.foundation.text.input.TextFieldLineLimits
+import androidx.compose.foundation.text.input.rememberTextFieldState
+import androidx.compose.foundation.text.input.setTextAndPlaceCursorAtEnd
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
@@ -21,12 +26,15 @@ import androidx.compose.ui.draw.blur
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.blur.BlurRadiusSpec
 import androidx.compose.ui.graphics.blur.BlurStop
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -51,6 +59,7 @@ fun AutomotiveCockpitUi(
     onEndStudyQuiz: () -> Unit,
     onSkipQuizCard: () -> Unit,
     onReadLastEmail: () -> Unit,
+    onInputChange: (String) -> Unit,
     onQuickAsk: (String) -> Unit,
     onStop: () -> Unit,
     onCycleVoice: (String) -> Unit,
@@ -314,6 +323,12 @@ fun AutomotiveCockpitUi(
                             Text("■   Stop Speaking", fontSize = 17.sp, fontWeight = FontWeight.Bold)
                         }
                     } else if (state.isListening) {
+                        val bars = when {
+                            state.micRmsDb >= 7f -> "▂▄▆█"
+                            state.micRmsDb >= 4f -> "▂▄▆"
+                            state.micRmsDb >= 1.5f -> "▂▄"
+                            else -> "▁"
+                        }
                         Button(
                             onClick = onPushToTalk,
                             shape = RoundedCornerShape(20.dp),
@@ -321,7 +336,7 @@ fun AutomotiveCockpitUi(
                             modifier = Modifier.weight(1f).height(68.dp),
                         ) {
                             Text(
-                                text = "🎙  " + state.listeningPartial.ifBlank { "Listening… (Tap to Stop)" },
+                                text = "🎙 $bars  " + state.listeningPartial.ifBlank { "Listening… (Tap to Stop)" },
                                 fontSize = 16.sp,
                                 fontWeight = FontWeight.Bold,
                                 maxLines = 1,
@@ -486,6 +501,88 @@ fun AutomotiveCockpitUi(
                                 fontSize = if (isSystem) 13.sp else 17.sp,
                                 lineHeight = if (isSystem) 18.sp else 24.sp,
                             )
+                        }
+                    }
+                }
+
+                // Parked-Mode Text Input Composer (hidden automatically in D · DRIVING mode for zero distraction)
+                CapturedAnimatedVisibility(
+                    visible = !isDriving,
+                    enter = fadeIn(),
+                    exit = fadeOut(),
+                ) {
+                    val tfState = rememberTextFieldState(initialText = state.inputText)
+                    LaunchedEffect(state.inputText) {
+                        if (tfState.text.toString() != state.inputText) {
+                            tfState.setTextAndPlaceCursorAtEnd(state.inputText)
+                        }
+                    }
+                    LaunchedEffect(tfState) {
+                        snapshotFlow { tfState.text.toString() }.collect { cur ->
+                            if (cur != state.inputText) onInputChange(cur)
+                        }
+                    }
+                    val canSend = state.ready && !state.busy && tfState.text.toString().isNotBlank()
+                    val submitQuery: () -> Unit = {
+                        val q = tfState.text.toString().trim()
+                        if (q.isNotEmpty() && state.ready && !state.busy) {
+                            onQuickAsk(q)
+                            tfState.setTextAndPlaceCursorAtEnd("")
+                            onInputChange("")
+                        }
+                    }
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(60.dp)
+                            .clip(RoundedCornerShape(18.dp))
+                            .background(surfaceCard)
+                            .padding(horizontal = 16.dp, vertical = 6.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(12.dp),
+                    ) {
+                        Box(
+                            modifier = Modifier.weight(1f),
+                            contentAlignment = Alignment.CenterStart,
+                        ) {
+                            if (tfState.text.isEmpty()) {
+                                Text(
+                                    text = if (state.quiz.active && state.quiz.awaitingAnswer) {
+                                        "Type or speak your answer for ${state.quiz.currentTopic}…"
+                                    } else {
+                                        "Type a question for ${if (state.activeAvatar == "gretchen") "Gretchen" else "Puck"} (Parked Mode)…"
+                                    },
+                                    color = textSecondary,
+                                    fontSize = 15.sp,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis,
+                                )
+                            }
+                            BasicTextField(
+                                state = tfState,
+                                enabled = state.ready && !state.busy,
+                                textStyle = TextStyle(color = textPrimary, fontSize = 16.sp),
+                                cursorBrush = SolidColor(primaryBlue),
+                                lineLimits = TextFieldLineLimits.SingleLine,
+                                keyboardOptions = KeyboardOptions(imeAction = ImeAction.Send),
+                                onKeyboardAction = { submitQuery() },
+                                modifier = Modifier.fillMaxWidth(),
+                            )
+                        }
+                        Button(
+                            onClick = submitQuery,
+                            enabled = canSend,
+                            shape = RoundedCornerShape(14.dp),
+                            colors = ButtonDefaults.buttonColors(
+                                containerColor = primaryBlue,
+                                contentColor = Color.White,
+                                disabledContainerColor = surfaceRaised,
+                                disabledContentColor = textSecondary,
+                            ),
+                            contentPadding = PaddingValues(horizontal = 20.dp, vertical = 0.dp),
+                            modifier = Modifier.height(46.dp),
+                        ) {
+                            Text("Send", fontSize = 15.sp, fontWeight = FontWeight.Bold)
                         }
                     }
                 }

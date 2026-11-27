@@ -107,8 +107,11 @@ class MainActivity : ComponentActivity() {
             } else {
                 maxOf(minBuf * 4, sampleRate * bytesPerFrame) // 1.0s ring buffer for long utterances
             }
+            val isEmulator = android.os.Build.HARDWARE.contains("ranchu", ignoreCase = true) ||
+                android.os.Build.FINGERPRINT.contains("generic", ignoreCase = true)
             val attrs = AudioAttributes.Builder()
-                .setUsage(if (isAutomotive) AudioAttributes.USAGE_ASSISTANT else AudioAttributes.USAGE_MEDIA)
+                // On real AAOS cars use USAGE_ASSISTANT; on x86_64 emulator use USAGE_MEDIA to avoid bus2 SODA contention
+                .setUsage(if (isAutomotive && !isEmulator) AudioAttributes.USAGE_ASSISTANT else AudioAttributes.USAGE_MEDIA)
                 .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
                 .build()
             if (isAutomotive && audioManager != null) {
@@ -1095,6 +1098,7 @@ class MainActivity : ComponentActivity() {
 
         var isListening by remember { mutableStateOf(false) }
         var listeningPartial by remember { mutableStateOf("") }
+        var micRmsDb by remember { mutableStateOf(0f) }
 
         val voiceLauncher = rememberLauncherForActivityResult(ActivityResultContracts.StartActivityForResult()) { res ->
             val spoken = res.data?.getStringArrayListExtra(RecognizerIntent.EXTRA_RESULTS)?.firstOrNull()
@@ -1110,6 +1114,7 @@ class MainActivity : ComponentActivity() {
                 runCatching { voiceLauncher.launch(intent) }.onFailure {
                     appendLog("Speech recognition unavailable on this device/image.")
                     chatHistory.add(ChatTurn("System", "No speech recognizer found on this device."))
+                    uiScope.launch { runCatching { chatListState.animateScrollToItem(chatHistory.lastIndex) } }
                 }
                 return
             }
@@ -1118,13 +1123,18 @@ class MainActivity : ComponentActivity() {
             speechRecognizer = sr
             isListening = true
             listeningPartial = ""
+            micRmsDb = 0f
+            var peakRms = -100f
             statusBadge = "Listening…"
             sr.setRecognitionListener(object : RecognitionListener {
                 override fun onReadyForSpeech(params: Bundle?) {
                     appendLog("Mic listening (SpeechRecognizer)…")
                 }
                 override fun onBeginningOfSpeech() {}
-                override fun onRmsChanged(rmsdB: Float) {}
+                override fun onRmsChanged(rmsdB: Float) {
+                    micRmsDb = rmsdB
+                    if (rmsdB > peakRms) peakRms = rmsdB
+                }
                 override fun onBufferReceived(buffer: ByteArray?) {}
                 override fun onEndOfSpeech() {
                     statusBadge = "Transcribing…"
@@ -1132,22 +1142,29 @@ class MainActivity : ComponentActivity() {
                 override fun onError(error: Int) {
                     isListening = false
                     listeningPartial = ""
+                    micRmsDb = 0f
+                    val silentInput = peakRms <= 0.5f
                     val msg = when (error) {
-                        SpeechRecognizer.ERROR_AUDIO -> "Audio recording error — check Emulator Extended Controls → Microphone → Virtual microphone uses host audio input."
-                        SpeechRecognizer.ERROR_NO_MATCH -> "Didn't catch that — tap mic and speak clearly."
-                        SpeechRecognizer.ERROR_SPEECH_TIMEOUT -> "No speech heard — make sure host mic passthrough is enabled."
+                        SpeechRecognizer.ERROR_AUDIO -> "Audio recording error — check Emulator Extended Controls (⋯) → Microphone → enable 'Virtual microphone uses host audio input'."
+                        SpeechRecognizer.ERROR_NO_MATCH, SpeechRecognizer.ERROR_SPEECH_TIMEOUT -> if (silentInput) {
+                            "Mic received silence — in Emulator Extended Controls (⋯) → Microphone, turn ON 'Virtual microphone uses host audio input', or type in the Parked box below."
+                        } else {
+                            "Didn't catch that — tap mic and speak clearly, or type below."
+                        }
                         SpeechRecognizer.ERROR_INSUFFICIENT_PERMISSIONS -> "Microphone permission required."
                         SpeechRecognizer.ERROR_NETWORK, SpeechRecognizer.ERROR_NETWORK_TIMEOUT -> "Speech service network error (offline pack missing)."
                         else -> "Speech recognizer error ($error)."
                     }
-                    appendLog("Mic error ($error): $msg")
+                    appendLog("Mic error ($error, peakRms=${"%.1f".format(peakRms)}): $msg")
                     if (error != SpeechRecognizer.ERROR_CLIENT) {
                         chatHistory.add(ChatTurn("System", msg))
+                        uiScope.launch { runCatching { chatListState.animateScrollToItem(chatHistory.lastIndex) } }
                     }
                     statusBadge = if (ready) "Ready" else statusBadge
                 }
                 override fun onResults(results: Bundle?) {
                     isListening = false
+                    micRmsDb = 0f
                     val spoken = results?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)?.firstOrNull().orEmpty().trim()
                     listeningPartial = ""
                     statusBadge = if (ready) "Ready" else statusBadge
@@ -1155,7 +1172,8 @@ class MainActivity : ComponentActivity() {
                         appendLog("Heard: \"$spoken\"")
                         sendQuestion(spoken)
                     } else {
-                        chatHistory.add(ChatTurn("System", "Didn't catch any words — try again."))
+                        chatHistory.add(ChatTurn("System", "Didn't catch any words — try again or type below."))
+                        uiScope.launch { runCatching { chatListState.animateScrollToItem(chatHistory.lastIndex) } }
                     }
                 }
                 override fun onPartialResults(partialResults: Bundle?) {
@@ -1264,6 +1282,7 @@ class MainActivity : ComponentActivity() {
             gmailCachedCount = gmailCachedCount,
             isListening = isListening,
             listeningPartial = listeningPartial,
+            micRmsDb = micRmsDb,
         )
 
         val launchMic: () -> Unit = {
@@ -1301,6 +1320,7 @@ class MainActivity : ComponentActivity() {
                 onEndStudyQuiz = { endStudyQuiz() },
                 onSkipQuizCard = { skipQuizCard() },
                 onReadLastEmail = { readGmailBrief("Read my last email") },
+                onInputChange = { inputText = it },
                 onQuickAsk = { sendQuestion(it) },
                 onStop = { stopActivePlayback() },
                 onCycleVoice = cycleAvatarVoice,

@@ -61,6 +61,9 @@ dependencies {
     implementation("com.google.ai.edge.litert:litert:2.3.0")
     implementation("com.google.ai.edge.litert:litert-gpu:2.3.0")
 
+    // Google AI Edge LiteRT-LM (100% on-device LLM fallback when AICore Gemini Nano is unavailable)
+    implementation("com.google.ai.edge.litertlm:litertlm-android:0.20.0")
+
     // Google ML Kit GenAI Prompt API (Pixel 10 built-in AICore Gemini Nano)
     implementation("com.google.mlkit:genai-prompt:1.0.0-beta5")
 

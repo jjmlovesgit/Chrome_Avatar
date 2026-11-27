@@ -12,7 +12,9 @@ import android.media.AudioTimestamp
 import android.media.AudioTrack
 import android.os.Bundle
 import android.os.Debug
+import android.speech.RecognitionListener
 import android.speech.RecognizerIntent
+import android.speech.SpeechRecognizer
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
@@ -53,6 +55,7 @@ class MainActivity : ComponentActivity() {
 
     private var activeAudioTrack: AudioTrack? = null
     private var activeJob: Job? = null
+    private var speechRecognizer: SpeechRecognizer? = null
 
     /**
      * Hardware-clock PCM player built on Android AudioTrack + AudioTimestamp.
@@ -200,7 +203,7 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         pipeline = AvatarPipeline(this)
-        nanoLlm = NanoLlmClient()
+        nanoLlm = NanoLlmClient(this)
         ttsEngine = AndroidTtsEngine(this)
 
         setContent {
@@ -210,6 +213,8 @@ class MainActivity : ComponentActivity() {
 
     override fun onDestroy() {
         super.onDestroy()
+        runCatching { speechRecognizer?.destroy() }
+        speechRecognizer = null
         stopActivePlayback()
         scope.cancel()
         pipeline.releaseModels()
@@ -399,18 +404,23 @@ class MainActivity : ComponentActivity() {
                 selectAvatar(activeAvatar)
                 downloadMissingModels()
 
-                statusBadge = "Compiling LiteRT + Warming Nano…"
+                statusBadge = "Compiling LiteRT + Loading Local LLM…"
                 val t0 = System.nanoTime()
                 withContext(Dispatchers.IO) {
-                    val nanoJob = async { nanoLlm.prepare { msg -> scope.launch { appendLog(msg) } } }
+                    val nanoJob = async {
+                        nanoLlm.prepare(
+                            preferGpu = useGpu,
+                            onProgress = { prog -> uiScope.launch { statusBadge = prog } },
+                        ) { msg -> scope.launch { appendLog(msg) } }
+                    }
                     val ttsJob = async { ttsEngine.prepareGenAiVoices { msg -> scope.launch { appendLog(msg) } } }
                     pipeline.initModels(preferGpu = useGpu) { msg -> scope.launch { appendLog(msg) } }
                     nanoJob.await()
                     ttsJob.await()
                 }
                 val bootSec = (System.nanoTime() - t0) / 1e9
-                appendLog("LiteRT 3-model stack + Nano + ${ttsEngine.statusLabel} ready in ${"%.2f".format(bootSec)}s (${pipeline.activeAcceleratorLabel})")
-                val nanoShort = if (nanoLlm.isReady) "Nano Ready" else nanoLlm.statusLabel
+                appendLog("LiteRT 3-model stack + ${nanoLlm.activeEngineShort} + ${ttsEngine.statusLabel} ready in ${"%.2f".format(bootSec)}s (${pipeline.activeAcceleratorLabel})")
+                val nanoShort = if (nanoLlm.isReady) nanoLlm.activeEngineShort else nanoLlm.statusLabel
                 val ttsShort = if (ttsEngine.statusLabel.contains("GenAI")) "GenAI 24kHz" else "Neural TTS"
                 nanoBadge = "$nanoShort · $ttsShort"
                 puckVoiceShort = ttsEngine.shortVoiceName("puck")
@@ -1033,9 +1043,93 @@ class MainActivity : ComponentActivity() {
             }
         }
 
+        var isListening by remember { mutableStateOf(false) }
+        var listeningPartial by remember { mutableStateOf("") }
+
         val voiceLauncher = rememberLauncherForActivityResult(ActivityResultContracts.StartActivityForResult()) { res ->
             val spoken = res.data?.getStringArrayListExtra(RecognizerIntent.EXTRA_RESULTS)?.firstOrNull()
             if (!spoken.isNullOrBlank()) sendQuestion(spoken)
+        }
+
+        fun startInAppSpeechRecognizer() {
+            if (!SpeechRecognizer.isRecognitionAvailable(this@MainActivity)) {
+                val intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
+                    putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
+                    putExtra(RecognizerIntent.EXTRA_PROMPT, "Ask Puck or Gretchen…")
+                }
+                runCatching { voiceLauncher.launch(intent) }.onFailure {
+                    appendLog("Speech recognition unavailable on this device/image.")
+                    chatHistory.add(ChatTurn("System", "No speech recognizer found on this device."))
+                }
+                return
+            }
+            runCatching { speechRecognizer?.destroy() }
+            val sr = SpeechRecognizer.createSpeechRecognizer(this@MainActivity)
+            speechRecognizer = sr
+            isListening = true
+            listeningPartial = ""
+            statusBadge = "Listening…"
+            sr.setRecognitionListener(object : RecognitionListener {
+                override fun onReadyForSpeech(params: Bundle?) {
+                    appendLog("Mic listening (SpeechRecognizer)…")
+                }
+                override fun onBeginningOfSpeech() {}
+                override fun onRmsChanged(rmsdB: Float) {}
+                override fun onBufferReceived(buffer: ByteArray?) {}
+                override fun onEndOfSpeech() {
+                    statusBadge = "Transcribing…"
+                }
+                override fun onError(error: Int) {
+                    isListening = false
+                    listeningPartial = ""
+                    val msg = when (error) {
+                        SpeechRecognizer.ERROR_AUDIO -> "Audio recording error — check Emulator Extended Controls → Microphone → Virtual microphone uses host audio input."
+                        SpeechRecognizer.ERROR_NO_MATCH -> "Didn't catch that — tap mic and speak clearly."
+                        SpeechRecognizer.ERROR_SPEECH_TIMEOUT -> "No speech heard — make sure host mic passthrough is enabled."
+                        SpeechRecognizer.ERROR_INSUFFICIENT_PERMISSIONS -> "Microphone permission required."
+                        SpeechRecognizer.ERROR_NETWORK, SpeechRecognizer.ERROR_NETWORK_TIMEOUT -> "Speech service network error (offline pack missing)."
+                        else -> "Speech recognizer error ($error)."
+                    }
+                    appendLog("Mic error ($error): $msg")
+                    if (error != SpeechRecognizer.ERROR_CLIENT) {
+                        chatHistory.add(ChatTurn("System", msg))
+                    }
+                    statusBadge = if (ready) "Ready" else statusBadge
+                }
+                override fun onResults(results: Bundle?) {
+                    isListening = false
+                    val spoken = results?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)?.firstOrNull().orEmpty().trim()
+                    listeningPartial = ""
+                    statusBadge = if (ready) "Ready" else statusBadge
+                    if (spoken.isNotBlank()) {
+                        appendLog("Heard: \"$spoken\"")
+                        sendQuestion(spoken)
+                    } else {
+                        chatHistory.add(ChatTurn("System", "Didn't catch any words — try again."))
+                    }
+                }
+                override fun onPartialResults(partialResults: Bundle?) {
+                    val partial = partialResults?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)?.firstOrNull().orEmpty()
+                    if (partial.isNotBlank()) listeningPartial = partial
+                }
+                override fun onEvent(eventType: Int, params: Bundle?) {}
+            })
+            val intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
+                putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
+                putExtra(RecognizerIntent.EXTRA_LANGUAGE, "en-US")
+                putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, true)
+                putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 1)
+            }
+            sr.startListening(intent)
+        }
+
+        val micPermLauncher = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
+            if (granted) {
+                startInAppSpeechRecognizer()
+            } else {
+                appendLog("RECORD_AUDIO permission denied.")
+                chatHistory.add(ChatTurn("System", "Microphone permission denied — allow Microphone in App Settings."))
+            }
         }
 
         val studyFileLauncher = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
@@ -1090,6 +1184,7 @@ class MainActivity : ComponentActivity() {
             statusBadge = statusBadge,
             nanoReady = nanoLlm.isReady,
             nanoBadge = nanoBadge,
+            llmEngineLabel = nanoLlm.activeEngineShort,
             inputText = inputText,
             logText = logText,
             memMain = memMain,
@@ -1117,14 +1212,21 @@ class MainActivity : ComponentActivity() {
             ),
             gmailAccessGranted = gmailAccessGranted,
             gmailCachedCount = gmailCachedCount,
+            isListening = isListening,
+            listeningPartial = listeningPartial,
         )
 
         val launchMic: () -> Unit = {
-            val intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
-                putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
-                putExtra(RecognizerIntent.EXTRA_PROMPT, "Ask Puck or Gretchen…")
+            if (isListening) {
+                runCatching { speechRecognizer?.stopListening() }
+                isListening = false
+                listeningPartial = ""
+                statusBadge = if (ready) "Ready" else statusBadge
+            } else if (checkSelfPermission(android.Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED) {
+                startInAppSpeechRecognizer()
+            } else {
+                micPermLauncher.launch(android.Manifest.permission.RECORD_AUDIO)
             }
-            runCatching { voiceLauncher.launch(intent) }
         }
 
         val cycleAvatarVoice: (String) -> Unit = { avatarKey ->

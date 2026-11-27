@@ -66,6 +66,7 @@ data class StudioUiState(
     val statusBadge: String,
     val nanoReady: Boolean,
     val nanoBadge: String,
+    val llmEngineLabel: String = "Gemini Nano",
     val inputText: String,
     val logText: String,
     val memMain: String,
@@ -83,6 +84,8 @@ data class StudioUiState(
     val quiz: QuizUiSnapshot = QuizUiSnapshot(),
     val gmailAccessGranted: Boolean = false,
     val gmailCachedCount: Int = 0,
+    val isListening: Boolean = false,
+    val listeningPartial: String = "",
 )
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -157,10 +160,11 @@ fun StudioUiV2(
                         maxLines = 1,
                     )
                     Text(
-                        text = if (state.nanoReady) "Gemini Nano · Offline" else "On-Device Studio",
+                        text = if (state.nanoReady) "${state.llmEngineLabel} · Offline" else "On-Device Studio",
                         color = textSecondary,
                         fontSize = 11.sp,
                         maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
                     )
                 }
 

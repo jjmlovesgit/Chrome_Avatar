@@ -218,11 +218,14 @@ fun AutomotiveCockpitUi(
                             fontWeight = FontWeight.SemiBold,
                             letterSpacing = (-0.4).sp,
                         )
+                        val llmTag = if (state.nanoReady) state.llmEngineLabel else "Offline Fallback"
                         Text(
-                            text = if (isDriving) "Hands-Free Driving Mode · Distraction Optimized"
-                            else "LiteRT + ML Drift · Cabin Audio Ducking Active",
+                            text = if (isDriving) "Hands-Free Driving · ${state.acceleratorLabel} · $llmTag"
+                            else "LiteRT ${state.acceleratorLabel} · $llmTag · Cabin Ducking",
                             color = if (isDriving) amber else textSecondary,
                             fontSize = 13.sp,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
                         )
                     }
 
@@ -309,6 +312,21 @@ fun AutomotiveCockpitUi(
                             modifier = Modifier.weight(1f).height(68.dp),
                         ) {
                             Text("■   Stop Speaking", fontSize = 17.sp, fontWeight = FontWeight.Bold)
+                        }
+                    } else if (state.isListening) {
+                        Button(
+                            onClick = onPushToTalk,
+                            shape = RoundedCornerShape(20.dp),
+                            colors = ButtonDefaults.buttonColors(containerColor = amber, contentColor = Color(0xFF0A0D12)),
+                            modifier = Modifier.weight(1f).height(68.dp),
+                        ) {
+                            Text(
+                                text = "🎙  " + state.listeningPartial.ifBlank { "Listening… (Tap to Stop)" },
+                                fontSize = 16.sp,
+                                fontWeight = FontWeight.Bold,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                            )
                         }
                     } else {
                         Button(

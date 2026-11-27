@@ -87,7 +87,18 @@ Measured live via Windows GPU Process Memory (`Win32_PerfFormattedData_GPUPerfor
 
 - **Cold boot (all 3 models resident + Nano warmed):** **`~3.14 s`** (`student_renderer_512_fp16w.tflite` compiles in `696 ms` on `WGPU-FP16`)
 - **On-device LLM:** **AICore Gemini Nano** (`genai-prompt:1.0.0-beta5`, parallel `warmup()`, `enableThinking=false`, live streaming, pipelined `0.22 s` turn lookahead in 3-Turn Demo) — **`~550–860 ms` / reply**, 100% offline
-- **On-device Voice & Sync:** Offline Android SEANet Neural TTS (Mutex-serialized `tpd` / `iog` defaults) + native **`AudioTrack` + hardware `AudioTimestamp` DAC clock** with render-ahead VSYNC pacing (**`~8–9 ms` mean sync error**, zero drift across 16–26s utterances!)
+- **On-device Voice & Sync:** Offline Android SEANet Neural TTS (Mutex-serialized `iom` / `tpc` defaults) + native **`AudioTrack` + hardware `AudioTimestamp` DAC clock** (`48 kHz` stereo `MODE_STATIC`) with render-ahead VSYNC pacing (**`~8–9 ms` mean sync error**, zero drift across 16–26s utterances!)
+
+### From `1.47 GB` Desktop PyTorch → `11.39 MB` Phone Native `512×512` HD
+
+| Stage | Model Artifact | Size | Pixel 10 Speed | Quality / Notes |
+| :--- | :--- | :---: | :---: | :--- |
+| **0. Original Checkpoint** | `renderer.ckpt` → `renderer.safetensors` | `1,472 MB` → **`543.1 MB`** | *(Desktop PyTorch only)* | `142.32M` params, `16.28 GB` desktop VRAM stack |
+| **1. Strip Encoders + C++ LiteRT Port** | `renderer_decode.tflite` (FP32) | **`285.7 MB`** | — | Stripped `criterion_vgg` (`49.4 MB`) + precomputed `dense_feature_encoder` (`133.9 MB`) & `latent_token_encoder` (`81.9 MB`) once per avatar into **`9.17 MB` face caches** (`-49%`); pure rank-≤-4 NHWC C++ graph (`118.2 dB` parity) |
+| **2. FP16 Weight Compression** | `renderer_decode_fp16w.tflite` | **`143.1 MB`** | `1.33 FPS` (Chrome) / **`2.80 FPS`** (Native) | `--fp16-weights` (`kFP16` + `Dequantize`, `63.6 dB` parity). Full teacher still `9×` too slow on mobile (`357 ms/frame`, `2.14 GB` RAM) |
+| **3. Teacher Pruning & INT8 Tests** | `renderer_decode_hd_fast.tflite` / `int8w` | `131.6 MB` / `72.6 MB` | **`4.75 FPS`** (`211 ms`) | Pruning high-res Swin/IMT blocks & INT8 weights hit mobile GPU memory-bandwidth wall |
+| **4. Knowledge Distillation v1 (`256²`)** | `student_renderer_256_fp16w.tflite` | **`6.74 MB`** (`21×` smaller) | **`33–42 FPS`** (`23–30 ms`) | Mobile-first **FiLM CoordConv U-Net** trained on `7,240` teacher frames (`36.64 dB` unseen PSNR, `~850 MB` RAM) — `25–32×` faster than mobile Chrome WebGPU |
+| **5. Native `512×512` HD Distillation v2 (Default)** | **`student_renderer_512_fp16w.tflite`** | **`11.39 MB`** (`12.6×` < `143 MB` teacher; **`129×`** < `1.47 GB` ckpt) | **`26.1 FPS`** (`38.3 ms` on `WGPU-FP16`) | **`5.82M` params** (`PixelShuffle(2)` + native `512²` gated `src_img` skip + VGG19 + PatchGAN + EMA on `10,240` frames): **`38.19 dB`** unseen 512px PSNR, `MouthMAE = 2.44/255` |
 
 ![Teacher (143 MB) vs. Distilled Native 512x512 HD Student v2 (11.39 MB) on Unseen Speech (Full + 2x Face Crops)](docs/val_teacher_vs_student512.png)
 

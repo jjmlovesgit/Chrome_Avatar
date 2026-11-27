@@ -175,6 +175,34 @@ Goal: Author IMTalker's 3 static inference graphs in C++ using Google's **LiteRT
      - **Teacher FP32 (`?renderer=teacher`):** **`527 ms`** compile, **`44.8 FPS`** (`22.3 ms/frame`, `203/203` frames), **`2.94 GB` WebGPU VRAM**.
 - **2026-11-26 — Native `512×512` HD Student v2 (`11.39 MB`, VGG19 + PatchGAN + `DepthToSpace(2)` + Gated `src_img` Skip):**
   1. **Distillation v2 (`distill_mobile_renderer_512.py` + `student_renderer_512_export.cc`):** Trained `5.82M`-param (`11.39 MB` FP16 `.tflite`, `12.6×` smaller than teacher) FiLM CoordConv U-Net with `DepthToSpace(2)` (`64→128→256→512`) + native `512×512` gated residual head (`alpha * rgb + (1 - alpha) * src_img`) on `10,000` native `512×512` teacher frames (`100` epochs, local IMTalker VGG19 perceptual loss on full frame + native 512px face crop + Spectral-Norm PatchGAN + EMA) → **`UNSEEN 512px PSNR = 38.19 dB`**, **`MouthMAE = 2.44 / 255`**, **`ValVGG = 0.2385`**, C++ LiteRT FP16 parity **`PSNR = 75.58 dB`** (`MAE = 0.0170/255`, `22.49 ms` CPU).
-  2. **Pixel 10 Live (`WGPU-FP16`):** **`26.09 FPS`** (`38.3 ms/frame` native `512×512` HD, `696 ms` compile, `3.14 s` total boot, `19.6×` faster than mobile Chrome WebGPU!). Plus hardware `AudioTrack` + `AudioTimestamp` DAC lip-sync (`~8–9 ms` mean error) and `Mutex`-serialized `TextToSpeech` voice switching (`tpd` / `iog`).
+  2. **Pixel 10 Live (`WGPU-FP16`):** **`26.09 FPS`** (`38.3 ms/frame` native `512×512` HD, `696 ms` compile, `3.14 s` total boot, `19.6×` faster than mobile Chrome WebGPU!). Plus hardware `AudioTrack` + `AudioTimestamp` DAC lip-sync (`~8–9 ms` mean error) and `Mutex`-serialized `TextToSpeech` voice switching (`iom` / `tpc` defaults).
   3. **Desktop Chrome WebGPU Live (RTX 5090, 0 errors):** **`73.8–77.1 FPS`** FP32 (`13.0–13.5 ms`, `59 ms` compile, `1.01–1.02 GB` VRAM) and **`88.0 FPS`** FP16 (`11.4 ms`, `51 ms` compile, `0.97 GB` VRAM).
+
+---
+
+## Model Transformation Summary: `1.47 GB` Desktop PyTorch → `11.39 MB` Phone Native `512×512` HD
+
+### Starting Point (Desktop PyTorch IMTalker)
+- **Raw checkpoint:** `checkpoints/renderer.ckpt` = **`1,472.34 MB` (`1.47 GB`)** (PyTorch StyleGAN `SynthesisNetwork` + `MotionDecoder` + `IMT` Cross-Attention + `Swin` Windowed Attention + Portrait Encoders + VGG loss + training state).
+- **Inference `.safetensors`:** `checkpoints/renderer.safetensors` = **`543.09 MB`** (`142.32M` params, FP32).
+- Together with `generator` (`148.2 MB`) + `wav2vec2` (`360.0 MB`) + LM Studio, the original desktop stack required **`16.28 GB` GPU VRAM**.
+
+### Step-by-Step Reduction to `11.39 MB` (Real-Time Native `512×512` HD on Phone)
+
+| Stage | Model Artifact | Size | Pixel 10 Speed | Quality / Notes |
+| :--- | :--- | :---: | :---: | :--- |
+| **0. Original Checkpoint** | `renderer.ckpt` → `renderer.safetensors` | `1,472 MB` → **`543.1 MB`** | *(Desktop PyTorch only)* | `142.32M` params, `16.28 GB` desktop VRAM stack |
+| **1. Strip Encoders + C++ LiteRT Port** | `renderer_decode.tflite` (FP32) | **`285.7 MB`** | — | Stripped `criterion_vgg` (`49.4 MB`) + precomputed `dense_feature_encoder` (`133.9 MB`) & `latent_token_encoder` (`81.9 MB`) once per avatar into **`9.17 MB` face caches** (`-49%`). Authored pure rank-≤-4 NHWC graph in C++ (`renderer_decode_export.cc`); **`118.2 dB`** parity |
+| **2. FP16 Weight Compression** | `renderer_decode_fp16w.tflite` | **`143.1 MB`** | `1.33 FPS` (Chrome) / **`2.80 FPS`** (Native) | `--fp16-weights` (`kFP16` + `Dequantize`), **`63.6 dB`** parity. Proved the full teacher was still **`9×` too slow** on mobile (`357 ms/frame`, `2.14 GB` RAM) |
+| **3. Teacher Pruning & INT8 Tests** | `renderer_decode_hd_fast.tflite` / `int8w` | `131.6 MB` / `72.6 MB` | **`4.75 FPS`** (`211 ms`) | Pruning high-res Swin/IMT blocks & INT8 weights hit a wall: StyleGAN `StyledConv` + `64²` attention + `256²` Swin are memory-bandwidth-bound on mobile GPUs |
+| **4. Knowledge Distillation v1 (`256²`)** | `student_renderer_256_fp16w.tflite` | **`6.74 MB`** (`21×` smaller) | **`33–42 FPS`** (`23–30 ms`) | Replaced StyleGAN+Swin with a mobile-first **FiLM CoordConv U-Net** (`distill_mobile_renderer.py`) trained on **`7,240` teacher frames** (`36.64 dB` unseen PSNR, `~850 MB` RAM). Shattered the mobile bottleneck (`25–32×` faster than Chrome WebGPU) |
+| **5. Native `512×512` HD Distillation v2 (Default)** | **`student_renderer_512_fp16w.tflite`** | **`11.39 MB`** (`12.6×` smaller than `143 MB` teacher; `48×` smaller than `543 MB` safetensors; **`129×`** smaller than `1.47 GB` ckpt) | **`26.1 FPS`** (`38.3 ms` on Pixel 10 `WGPU-FP16`) | **`5.82M` params** (`distill_mobile_renderer_512.py` + `student_renderer_512_export.cc`): **`38.19 dB`** unseen 512px PSNR, `MouthMAE = 2.44/255` (beat the `131.6 MB` pruned teacher's `38.15 dB`!) |
+
+### Key Architecture Choices Behind the `11.39 MB` Native `512×512` HD Student v2
+1. **Fast `256²` FiLM CoordConv U-Net core** (`24→48→80→144→224`, 3 bottleneck `FiLMResBlock`s) conditioned directly on the exact same 32-D motion tokens from `wav2vec2` + `fm_step`.
+2. **`PixelShuffle(2)` (`DepthToSpace(2)`)** upsampling at `64→128→256→512` instead of bilinear upsampling (eliminates blur).
+3. **Native `512×512` Gated Residual Skip (`alpha * rgb_pred + (1 - alpha) * src_img_512`):** Focuses the `5.82M` params on moving lips/eyes/jaw while passing static hair, skin micro-texture, and background straight through at full `512×512` fidelity.
+4. **Teacher-Supervised Perceptual + Adversarial Training:** `10,240` native `512×512` teacher frames trained `100` epochs (`122 min` on RTX 5090) with **IMTalker's own VGG19 perceptual loss** (loaded directly from `renderer.safetensors`, applied to both full frame and native-512px mouth/face crop) + **Spectral-Norm PatchGAN** + **EMA**.
+5. **Direct C++ LiteRT Tensor API Export (`--fp16-weights`):** Zero Python TFLite converter—`75.58 dB` parity vs. PyTorch FP32 and **0 unsupported GPU ops** across WebGPU (RTX 5090: **`74–88 FPS`**), ML Drift `WGPU-FP16` (Pixel 10: **`26.1 FPS`**, Pixel 7a: **`18–19 FPS`**), and ML Drift `GL-FP16` (AAOS cockpit: **`21–22 FPS`**).
+
 

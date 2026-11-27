@@ -141,11 +141,12 @@ class MainActivity : ComponentActivity() {
 
                 writerJob = scope.launch(Dispatchers.IO) {
                     try {
+                        val minWaitMs = (durationMs + 100.0).toLong()
                         val maxWaitMs = (durationMs + 700.0).toLong()
                         while (isActive) {
                             val elapsedMs = (System.nanoTime() - playStartNano) / 1_000_000L
                             val head = track.playbackHeadPosition.toLong() and 0xFFFFFFFFL
-                            if (head >= totalPaddedFrames - 256 || elapsedMs >= maxWaitMs) break
+                            if ((head >= totalPaddedFrames - 256 && elapsedMs >= minWaitMs) || elapsedMs >= maxWaitMs) break
                             delay(15)
                         }
                     } finally {
@@ -168,11 +169,12 @@ class MainActivity : ComponentActivity() {
                             if (written <= 0) break
                             offset += written
                         }
+                        val minWaitMs = (durationMs + 100.0).toLong()
                         val maxWaitMs = (durationMs + 700.0).toLong()
                         while (isActive) {
                             val elapsedMs = (System.nanoTime() - playStartNano) / 1_000_000L
                             val head = track.playbackHeadPosition.toLong() and 0xFFFFFFFFL
-                            if (head >= totalPaddedFrames - 256 || elapsedMs >= maxWaitMs) break
+                            if ((head >= totalPaddedFrames - 256 && elapsedMs >= minWaitMs) || elapsedMs >= maxWaitMs) break
                             delay(15)
                         }
                     } finally {

@@ -358,6 +358,9 @@ class AndroidTtsEngine(private val context: Context) {
         val mono = FloatArray(totalFrames)
         val monoPcm16Bytes = ByteArray(totalFrames * 2)
         val outBb = ByteBuffer.wrap(monoPcm16Bytes).order(ByteOrder.LITTLE_ENDIAN)
+        // Soft 6ms fade-in/out + -1.4 dB headroom prevents digital clipping in 24kHz->48kHz resamplers & clicks
+        val fadeFrames = (sampleRate * 0.006).toInt().coerceIn(1, (totalFrames / 4).coerceAtLeast(1))
+        val headroom = 0.85f
         for (i in 0 until totalFrames) {
             var acc = 0f
             for (c in 0 until channels) {
@@ -367,7 +370,12 @@ class AndroidTtsEngine(private val context: Context) {
             }
             val avg = acc / channels
             mono[i] = avg
-            val s16 = (avg * 32767f).toInt().coerceIn(-32768, 32767).toShort()
+            val env = when {
+                i < fadeFrames -> i.toFloat() / fadeFrames
+                i >= totalFrames - fadeFrames -> (totalFrames - 1 - i).toFloat() / fadeFrames
+                else -> 1f
+            }
+            val s16 = (avg * headroom * env * 32767f).toInt().coerceIn(-32768, 32767).toShort()
             outBb.putShort(s16)
         }
         val durationSec = totalFrames.toDouble() / sampleRate.toDouble()

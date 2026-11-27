@@ -76,6 +76,11 @@ class MainActivity : ComponentActivity() {
         val sampleRate: Int = audio.rawSampleRate
         val totalFrames: Long = audio.rawTotalFrames.toLong()
         val durationMs: Double = audio.durationSec * 1000.0
+        // Pad 180 ms of trailing silence so AudioFlinger/AAOS never clips the final syllable
+        private val tailPadBytes: Int = ((sampleRate * 0.18).toInt().coerceAtLeast(1024)) * 2
+        private val paddedPcm: ByteArray = audio.pcmRawBytes + ByteArray(tailPadBytes)
+        private val totalPaddedFrames: Long = (paddedPcm.size / 2).toLong()
+        private val useStaticMode: Boolean = paddedPcm.size in 4..(2 * 1024 * 1024)
 
         val track: AudioTrack
         private val ts = AudioTimestamp()
@@ -95,8 +100,12 @@ class MainActivity : ComponentActivity() {
                 sampleRate,
                 AudioFormat.CHANNEL_OUT_MONO,
                 AudioFormat.ENCODING_PCM_16BIT,
-            ).coerceAtLeast(4096)
-            val bufBytes = maxOf(minBuf * 2, sampleRate * 2 / 5) // ~200 ms low-latency ring buffer
+            ).coerceAtLeast(8192)
+            val bufBytes = if (useStaticMode) {
+                paddedPcm.size
+            } else {
+                maxOf(minBuf * 4, sampleRate * 2) // 1.0s ring buffer for long utterances
+            }
             val attrs = AudioAttributes.Builder()
                 .setUsage(if (isAutomotive) AudioAttributes.USAGE_ASSISTANT else AudioAttributes.USAGE_MEDIA)
                 .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
@@ -118,37 +127,57 @@ class MainActivity : ComponentActivity() {
                         .build()
                 )
                 .setBufferSizeInBytes(bufBytes)
-                .setTransferMode(AudioTrack.MODE_STREAM)
+                .setTransferMode(if (useStaticMode) AudioTrack.MODE_STATIC else AudioTrack.MODE_STREAM)
                 .build()
         }
 
         fun start(scope: CoroutineScope) {
-            val pcm = audio.pcmRawBytes
-            // Pre-fill initial buffer before play() so hardware starts cleanly with zero underrun
-            val prefill = minOf(pcm.size, sampleRate * 2 / 10) // 100 ms prefill
-            var offset = if (prefill > 0) track.write(pcm, 0, prefill).coerceAtLeast(0) else 0
-            playStartNano = System.nanoTime()
-            track.play()
+            if (useStaticMode) {
+                // Entire utterance (+ trailing silence) lives in AudioFlinger shared memory:
+                // zero background writes, zero underruns even when Qwen3 prefetches on CPU!
+                track.write(paddedPcm, 0, paddedPcm.size)
+                playStartNano = System.nanoTime()
+                track.play()
 
-            writerJob = scope.launch(Dispatchers.IO) {
-                try {
-                    val chunkBytes = 4096
-                    while (isActive && offset < pcm.size) {
-                        val toWrite = minOf(chunkBytes, pcm.size - offset)
-                        val written = track.write(pcm, offset, toWrite, AudioTrack.WRITE_BLOCKING)
-                        if (written <= 0) break
-                        offset += written
+                writerJob = scope.launch(Dispatchers.IO) {
+                    try {
+                        val maxWaitMs = (durationMs + 700.0).toLong()
+                        while (isActive) {
+                            val elapsedMs = (System.nanoTime() - playStartNano) / 1_000_000L
+                            val head = track.playbackHeadPosition.toLong() and 0xFFFFFFFFL
+                            if (head >= totalPaddedFrames - 256 || elapsedMs >= maxWaitMs) break
+                            delay(15)
+                        }
+                    } finally {
+                        finished = true
                     }
-                    // Wait until the hardware DAC finishes playing the final sample
-                    while (isActive) {
-                        val posMs = acousticPositionMs()
-                        if (posMs >= durationMs - 15.0) break
-                        val head = track.playbackHeadPosition.toLong() and 0xFFFFFFFFL
-                        if (head >= totalFrames) break
-                        delay(12)
+                }
+            } else {
+                val prefill = minOf(paddedPcm.size, sampleRate) // 500 ms prefill
+                var offset = if (prefill > 0) track.write(paddedPcm, 0, prefill).coerceAtLeast(0) else 0
+                playStartNano = System.nanoTime()
+                track.play()
+
+                writerJob = scope.launch(Dispatchers.IO) {
+                    runCatching { android.os.Process.setThreadPriority(android.os.Process.THREAD_PRIORITY_AUDIO) }
+                    try {
+                        val chunkBytes = 16384
+                        while (isActive && offset < paddedPcm.size) {
+                            val toWrite = minOf(chunkBytes, paddedPcm.size - offset)
+                            val written = track.write(paddedPcm, offset, toWrite, AudioTrack.WRITE_BLOCKING)
+                            if (written <= 0) break
+                            offset += written
+                        }
+                        val maxWaitMs = (durationMs + 700.0).toLong()
+                        while (isActive) {
+                            val elapsedMs = (System.nanoTime() - playStartNano) / 1_000_000L
+                            val head = track.playbackHeadPosition.toLong() and 0xFFFFFFFFL
+                            if (head >= totalPaddedFrames - 256 || elapsedMs >= maxWaitMs) break
+                            delay(15)
+                        }
+                    } finally {
+                        finished = true
                     }
-                } finally {
-                    finished = true
                 }
             }
         }
@@ -195,10 +224,13 @@ class MainActivity : ComponentActivity() {
         }
 
         fun release() {
+            val wasFinished = finished
             writerJob?.cancel()
             writerJob = null
-            runCatching { track.pause() }
-            runCatching { track.flush() }
+            if (!wasFinished) {
+                runCatching { track.pause() }
+                runCatching { track.flush() }
+            }
             runCatching { track.stop() }
             runCatching { track.release() }
             focusRequest?.let { req -> runCatching { audioManager?.abandonAudioFocusRequest(req) } }

@@ -57,6 +57,12 @@ class MainActivity : ComponentActivity() {
     private var activeJob: Job? = null
     private var speechRecognizer: SpeechRecognizer? = null
 
+    // Dedicated single thread for LiteRT GPU/OpenGL ES inference so the EGLContext
+    // stays permanently bound to the exact thread that compiled the models.
+    private val litertDispatcher = java.util.concurrent.Executors.newSingleThreadExecutor { r ->
+        Thread(r, "LiteRT-GPU-Thread").apply { priority = Thread.MAX_PRIORITY }
+    }.asCoroutineDispatcher()
+
     /**
      * Hardware-clock PCM player built on Android AudioTrack + AudioTimestamp.
      * Tracks the exact acoustic playback time exiting the physical speaker / Bluetooth DAC
@@ -217,7 +223,12 @@ class MainActivity : ComponentActivity() {
         speechRecognizer = null
         stopActivePlayback()
         scope.cancel()
-        pipeline.releaseModels()
+        runCatching {
+            kotlinx.coroutines.runBlocking(litertDispatcher) {
+                pipeline.releaseModels()
+            }
+        }
+        runCatching { litertDispatcher.close() }
         nanoLlm.close()
         ttsEngine.close()
     }
@@ -406,15 +417,18 @@ class MainActivity : ComponentActivity() {
 
                 statusBadge = "Compiling LiteRT + Loading Local LLM…"
                 val t0 = System.nanoTime()
-                withContext(Dispatchers.IO) {
-                    val nanoJob = async {
+                coroutineScope {
+                    val nanoJob = async(Dispatchers.IO) {
                         nanoLlm.prepare(
                             preferGpu = useGpu,
                             onProgress = { prog -> uiScope.launch { statusBadge = prog } },
                         ) { msg -> scope.launch { appendLog(msg) } }
                     }
-                    val ttsJob = async { ttsEngine.prepareGenAiVoices { msg -> scope.launch { appendLog(msg) } } }
-                    pipeline.initModels(preferGpu = useGpu) { msg -> scope.launch { appendLog(msg) } }
+                    val ttsJob = async(Dispatchers.IO) { ttsEngine.prepareGenAiVoices { msg -> scope.launch { appendLog(msg) } } }
+                    val pipeJob = async(litertDispatcher) {
+                        pipeline.initModels(preferGpu = useGpu) { msg -> scope.launch { appendLog(msg) } }
+                    }
+                    pipeJob.await()
                     nanoJob.await()
                     ttsJob.await()
                 }
@@ -427,9 +441,9 @@ class MainActivity : ComponentActivity() {
                 gretchenVoiceShort = ttsEngine.shortVoiceName("gretchen")
                 voiceLabel = ttsEngine.shortVoiceName(activeAvatar)
 
-                statusBadge = "Benchmarking Tensor G5…"
+                statusBadge = "Benchmarking GPU…"
                 val targetBmp = nextWorkBmp()
-                val bench = withContext(Dispatchers.IO) {
+                val bench = withContext(litertDispatcher) {
                     val av = pipeline.avatars[activeAvatar]!!
                     pipeline.runBenchmark(av, targetBmp, nFrames = 6)
                 }
@@ -464,7 +478,7 @@ class MainActivity : ComponentActivity() {
             appendLog("TTS (${avatar.displayName}): ${"%.0f".format(ttsAudio.synthMs)} ms (${"%.2f".format(ttsAudio.durationSec)}s)")
 
             statusBadge = "Motion (${avatar.displayName})…"
-            val (allTokens, totalFrames, motionMs) = withContext(Dispatchers.IO) {
+            val (allTokens, totalFrames, motionMs) = withContext(litertDispatcher) {
                 pipeline.generateMotionTokens(ttsAudio.pcm16k, ttsAudio.durationSec, avatar)
             }
             metricMotion = "${"%.0f".format(motionMs)} ms"
@@ -484,7 +498,7 @@ class MainActivity : ComponentActivity() {
 
                 // Pre-render frames with live progress; once remaining render time < audio duration,
                 // start audio playback and overlap the tail frames in parallel!
-                val renderJob = uiScope.launch(Dispatchers.IO) {
+                val renderJob = uiScope.launch(litertDispatcher) {
                     val side = pipeline.renderSide
                     val tmp = Bitmap.createBitmap(side, side, Bitmap.Config.ARGB_8888)
                     for (k in 0 until nOut) {
@@ -576,7 +590,7 @@ class MainActivity : ComponentActivity() {
                 // shape hits the OLED right as that exact audio sample exits the physical speaker/earbuds!
                 val initBmp = nextWorkBmp()
                 val firstTok = allTokens.copyOfRange(0, 32)
-                var emaRendMs = withContext(Dispatchers.IO) { pipeline.renderFrame(avatar, firstTok, initBmp) }
+                var emaRendMs = withContext(litertDispatcher) { pipeline.renderFrame(avatar, firstTok, initBmp) }
                 frameBmp = initBmp
                 frameVersion++
 
@@ -613,7 +627,7 @@ class MainActivity : ComponentActivity() {
                         lastIdx = targetIdx
                         val tok = allTokens.copyOfRange(targetIdx * 32, (targetIdx + 1) * 32)
                         val targetBmp = nextWorkBmp()
-                        val rMs = withContext(Dispatchers.IO) { pipeline.renderFrame(avatar, tok, targetBmp) }
+                        val rMs = withContext(litertDispatcher) { pipeline.renderFrame(avatar, tok, targetBmp) }
                         emaRendMs = 0.8 * emaRendMs + 0.2 * rMs
 
                         // Pace presentation to hit exact acoustic timestamp (minus 1 VSYNC scanout)

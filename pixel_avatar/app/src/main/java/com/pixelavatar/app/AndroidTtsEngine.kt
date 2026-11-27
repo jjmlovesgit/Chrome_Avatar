@@ -52,6 +52,8 @@ class AndroidTtsEngine(private val context: Context) {
         return raw.removePrefix("en-us-x-").removeSuffix("-local").ifBlank { raw }
     }
 
+    private val prefs by lazy { context.getSharedPreferences("pixel_avatar_voices", Context.MODE_PRIVATE) }
+
     fun cycleVoice(avatarKey: String): String {
         if (availableVoices.isEmpty()) return shortVoiceName(avatarKey)
         val isGretchen = avatarKey == "gretchen"
@@ -61,9 +63,11 @@ class AndroidTtsEngine(private val context: Context) {
         if (isGretchen) {
             gretchenVoice = next
             gretchenVoiceName = next.name
+            prefs.edit().putString("voice_gretchen", next.name).apply()
         } else {
             puckVoice = next
             puckVoiceName = next.name
+            prefs.edit().putString("voice_puck", next.name).apply()
         }
         android.util.Log.i("PixelAvatar", "Voice switched for $avatarKey -> ${next.name}")
         return shortVoiceName(avatarKey)
@@ -253,12 +257,16 @@ class AndroidTtsEngine(private val context: Context) {
             return
         }
 
-        // Pick user's preferred Google SEANet Neural local voices (Puck=tpd, Gretchen=ioj/iog)
-        puckVoice = enUsLocal.firstOrNull { it.name.contains("tpd", ignoreCase = true) }
-            ?: enUsLocal.firstOrNull { it.name.contains("iol") || it.name.contains("iom") }
+        // Pick user's saved or preferred Google SEANet Neural local voices (default: Puck=iom, Gretchen=tpc)
+        val savedPuck = prefs.getString("voice_puck", null)
+        val savedGretchen = prefs.getString("voice_gretchen", null)
+        puckVoice = savedPuck?.let { name -> enUsLocal.firstOrNull { it.name.equals(name, ignoreCase = true) } }
+            ?: enUsLocal.firstOrNull { it.name.contains("iom", ignoreCase = true) }
+            ?: enUsLocal.firstOrNull { it.name.contains("tpd", ignoreCase = true) || it.name.contains("iol", ignoreCase = true) }
             ?: enUsLocal.firstOrNull()
-        gretchenVoice = enUsLocal.firstOrNull { it != puckVoice && (it.name.contains("ioj", ignoreCase = true) || it.name.contains("iog", ignoreCase = true)) }
-            ?: enUsLocal.firstOrNull { it != puckVoice && (it.name.contains("iob") || it.name.contains("tpf") || it.name.contains("tpc")) }
+        gretchenVoice = savedGretchen?.let { name -> enUsLocal.firstOrNull { it.name.equals(name, ignoreCase = true) } }
+            ?: enUsLocal.firstOrNull { it != puckVoice && it.name.contains("tpc", ignoreCase = true) }
+            ?: enUsLocal.firstOrNull { it != puckVoice && (it.name.contains("iog", ignoreCase = true) || it.name.contains("ioj", ignoreCase = true) || it.name.contains("tpf", ignoreCase = true) || it.name.contains("iob", ignoreCase = true)) }
             ?: enUsLocal.firstOrNull { it != puckVoice }
             ?: puckVoice
         puckVoiceName = puckVoice?.name ?: "default"
